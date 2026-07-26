@@ -1485,7 +1485,7 @@ def upload_document_corpus():
 
         # Get metadata
         title = request.form.get('title', file.filename)
-        tags = request.form.getlist('tags', [])
+        tags = request.form.getlist('tags')
 
         # Save uploaded file temporarily
         filename = secure_filename(file.filename)
