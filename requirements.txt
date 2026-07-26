@@ -1,6 +1,7 @@
 flask
 torch
 transformers
+accelerate
 sacrebleu
 pandas
 numpy

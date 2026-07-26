@@ -276,21 +276,38 @@ def load_models():
         print("\n[STEP 1/3] Loading Models...")
         print("=" * 80)
 
-        # Load Translation Models
-        print("\n📖 Loading NLLB-200 Translation Model...")
-        model_name = "facebook/nllb-200-distilled-600M"
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {device}")
+        # Load Translation Models. NLLB-200-distilled-600M needs a few GB of
+        # RAM to download and load; on a memory-constrained machine the OS
+        # OOM-killer can terminate the process here with no Python
+        # traceback (nothing to catch - it's a SIGKILL). Set SKIP_NMT_MODEL=1
+        # to bypass this entirely and run in Dictionary+EBMT-only mode.
+        if os.getenv('SKIP_NMT_MODEL', '').lower() in ('1', 'true', 'yes'):
+            print("\n📖 SKIP_NMT_MODEL is set - skipping NLLB-200 load. "
+                  "NMT translation will be unavailable; Dictionary and EBMT still work.")
+            model_cache['tokenizer'] = None
+            model_cache['model'] = None
+            model_cache['device'] = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            print("\n📖 Loading NLLB-200 Translation Model...")
+            model_name = "facebook/nllb-200-distilled-600M"
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"Using device: {device}")
 
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-        model = model.to(device)
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            try:
+                # low_cpu_mem_usage avoids holding a duplicate full-precision
+                # copy of the weights in RAM while loading, roughly halving
+                # peak memory use during this step (requires 'accelerate').
+                model = AutoModelForSeq2SeqLM.from_pretrained(model_name, low_cpu_mem_usage=True)
+            except ImportError:
+                model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+            model = model.to(device)
 
-        model_cache['tokenizer'] = tokenizer
-        model_cache['model'] = model
-        model_cache['device'] = device
+            model_cache['tokenizer'] = tokenizer
+            model_cache['model'] = model
+            model_cache['device'] = device
 
-        print("✅ NLLB-200 model loaded successfully!")
+            print("✅ NLLB-200 model loaded successfully!")
 
         # Load Semantic Model for Cross-Language Detection.
         # Prefer our own IndicBERT fine-tuned on the Hindi-Punjabi parallel
