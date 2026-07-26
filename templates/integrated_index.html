@@ -248,7 +248,15 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-function simColor(v) {
+// "risk" bars (plagiarism/corpus/internet similarity) treat high values as
+// bad (red); "quality" bars (EBMT match confidence, NMT confidence) treat
+// high values as good (green) - same visual language, opposite meaning.
+function simColor(v, polarity) {
+  if (polarity === 'quality') {
+    if (v >= 0.8) return 'var(--green)';
+    if (v >= 0.5) return 'var(--amber)';
+    return 'var(--red)';
+  }
   if (v >= 0.8) return 'var(--red)';
   if (v >= 0.6) return 'var(--amber)';
   return 'var(--green)';
@@ -262,7 +270,7 @@ function simBar(value, opts) {
   return `
     <div class="sim-bar-wrap">
       ${label ? `<span style="font-size:12.5px;color:var(--muted);min-width:${opts.labelWidth || 70}px;">${escapeHtml(label)}</span>` : ''}
-      <div class="sim-bar-track"><div class="sim-bar-fill" style="width:${pct.toFixed(1)}%; background:${simColor(v)};"></div></div>
+      <div class="sim-bar-track"><div class="sim-bar-fill" style="width:${pct.toFixed(1)}%; background:${simColor(v, opts.polarity)};"></div></div>
       <span class="sim-bar-pct">${pct.toFixed(0)}%</span>
     </div>`;
 }
@@ -352,12 +360,12 @@ function renderModesHtml(modes) {
       <div class="card">
         <h2>EBMT Mode</h2>
         <p style="font-size:14.5px;">${escapeHtml(ebmt.translation)}</p>
-        ${simBar(ebmt.similarity, {label: 'Corpus similarity'})}
+        ${simBar(ebmt.similarity, {label: 'Corpus similarity', polarity: 'quality'})}
       </div>
       <div class="card">
         <h2>NMT Mode</h2>
         <p style="font-size:14.5px;">${escapeHtml(nmt.translation)}</p>
-        ${nmt.confidence !== null && nmt.confidence >= 0 ? simBar(nmt.confidence, {label: 'Confidence'}) : '<p class="empty-state">Not available (model not loaded)</p>'}
+        ${nmt.confidence !== null && nmt.confidence >= 0 ? simBar(nmt.confidence, {label: 'Confidence', polarity: 'quality'}) : '<p class="empty-state">Not available (model not loaded)</p>'}
       </div>
     </div>
     <div class="card">
