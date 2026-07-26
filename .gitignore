@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+uploads/
+corpus/
+corpus_database.db
+hindi_punjabi_dictionary.csv
+parallel_corpus.csv
+
+# Fine-tuned model checkpoints are large binary artifacts - regenerate them
+# with `python train_indicbert.py` rather than committing them.
+models/*
+!models/.gitkeep

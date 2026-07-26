@@ -1,0 +1,15 @@
+flask
+torch
+transformers
+sacrebleu
+pandas
+numpy
+sentencepiece
+protobuf
+sentence-transformers
+scikit-learn
+requests
+nltk
+werkzeug
+PyPDF2
+python-docx
