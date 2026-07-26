@@ -312,27 +312,49 @@ def load_models():
         # Load Semantic Model for Cross-Language Detection.
         # Prefer our own IndicBERT fine-tuned on the Hindi-Punjabi parallel
         # corpus (see train_indicbert.py) and fall back to the generic
-        # pretrained IndicSBERT model when no fine-tuned checkpoint exists.
+        # pretrained IndicSBERT model when no fine-tuned checkpoint exists -
+        # or when it exists but turns out to be broken (a training run that
+        # was interrupted mid-save, e.g. by an OOM kill, can leave a
+        # partial/corrupted checkpoint that still "loads" as an object but
+        # throws things like "IndexError: index out of range in self" the
+        # first time it actually encodes something). Running one real
+        # encode() call here as a self-test surfaces that immediately, with
+        # a clear message, instead of it resurfacing confusingly later deep
+        # inside unrelated request handling.
         print("\n🧠 Loading Semantic Similarity Model for Cross-Language Detection...")
-        try:
-            if os.path.isdir(FINETUNED_INDICBERT_PATH) and os.listdir(FINETUNED_INDICBERT_PATH):
+        semantic_model = None
+        model_cache['semantic_model_source'] = None
+
+        if os.path.isdir(FINETUNED_INDICBERT_PATH) and os.listdir(FINETUNED_INDICBERT_PATH):
+            try:
                 print(f"   Found fine-tuned IndicBERT checkpoint: '{FINETUNED_INDICBERT_PATH}'")
-                semantic_model = SentenceTransformer(FINETUNED_INDICBERT_PATH)
+                candidate = SentenceTransformer(FINETUNED_INDICBERT_PATH)
+                candidate.encode(["सत्यापन वाक्य"])  # self-test
+                semantic_model = candidate
                 model_cache['semantic_model_source'] = 'finetuned-indicbert'
                 print("✅ Fine-tuned IndicBERT (Hindi-Punjabi) loaded successfully!")
-            else:
-                print(f"   No fine-tuned IndicBERT found at '{FINETUNED_INDICBERT_PATH}'.")
-                print(f"   Run 'python train_indicbert.py' to fine-tune one on the custom corpus.")
-                print(f"   Falling back to pretrained model: {PRETRAINED_SEMANTIC_MODEL}")
-                semantic_model = SentenceTransformer(PRETRAINED_SEMANTIC_MODEL)
+            except Exception as e:
+                print(f"⚠️ Fine-tuned IndicBERT checkpoint failed to load/self-test: {e}")
+                print(f"   This usually means training was interrupted before it finished and left a "
+                      f"partial/corrupted checkpoint at '{FINETUNED_INDICBERT_PATH}'. Delete that folder "
+                      f"and re-run train_indicbert.py when convenient - falling back to the pretrained "
+                      f"model for now.")
+        else:
+            print(f"   No fine-tuned IndicBERT found at '{FINETUNED_INDICBERT_PATH}'.")
+            print(f"   Run 'python train_indicbert.py' to fine-tune one on the custom corpus.")
+
+        if semantic_model is None:
+            try:
+                print(f"   Loading pretrained model: {PRETRAINED_SEMANTIC_MODEL}")
+                candidate = SentenceTransformer(PRETRAINED_SEMANTIC_MODEL)
+                candidate.encode(["सत्यापन वाक्य"])  # self-test
+                semantic_model = candidate
                 model_cache['semantic_model_source'] = 'pretrained-indicsbert'
                 print("✅ Pretrained IndicSBERT loaded successfully!")
+            except Exception as e:
+                print(f"⚠️ Semantic model loading failed: {e}")
 
-            model_cache['semantic_model'] = semantic_model
-        except Exception as e:
-            print(f"⚠️ Semantic model loading failed: {e}")
-            model_cache['semantic_model'] = None
-            model_cache['semantic_model_source'] = None
+        model_cache['semantic_model'] = semantic_model
 
         # Load TF-IDF Vectorizer
         print("\n📝 Loading TF-IDF Vectorizer...")
