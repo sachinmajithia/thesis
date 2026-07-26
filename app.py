@@ -14,6 +14,7 @@ import re
 import unicodedata
 import os
 import random
+import uuid
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 from werkzeug.utils import secure_filename
@@ -87,9 +88,29 @@ def allowed_file(filename):
     """Check if file extension is allowed"""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
+def safe_upload_filename(original_filename: str) -> str:
+    """
+    Build a filesystem-safe filename for an uploaded file while guaranteeing
+    it keeps a valid extension. werkzeug's secure_filename() strips all
+    non-ASCII characters - common in Hindi/Punjabi document names - and if
+    that empties the base name, it also strips the separating dot (e.g.
+    'मेरा_दस्तावेज़.txt' -> 'txt'), losing the extension entirely. Re-attach
+    the extension explicitly, using a generated base name if sanitizing the
+    original left nothing usable.
+    Caller must have already validated the original filename with allowed_file().
+    """
+    ext = original_filename.rsplit('.', 1)[1].lower()
+    base = secure_filename(original_filename.rsplit('.', 1)[0])
+    if not base:
+        base = uuid.uuid4().hex[:12]
+    return f"{base}.{ext}"
+
 def extract_text_from_file(filepath):
     """Extract text from various file formats"""
     filename = os.path.basename(filepath)
+    if '.' not in filename:
+        print(f"❌ Cannot determine file type for '{filename}' (no extension)")
+        return None
     ext = filename.rsplit('.', 1)[1].lower()
 
     try:
@@ -1433,7 +1454,7 @@ def upload_document_plagiarism():
         use_sentence_search = request.form.get('use_sentence_search', 'true').lower() != 'false'
 
         # Save uploaded file
-        filename = secure_filename(file.filename)
+        filename = safe_upload_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
 
@@ -1488,7 +1509,7 @@ def upload_document_corpus():
         tags = request.form.getlist('tags')
 
         # Save uploaded file temporarily
-        filename = secure_filename(file.filename)
+        filename = safe_upload_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
 
