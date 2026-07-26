@@ -13,3 +13,4 @@ nltk
 werkzeug
 PyPDF2
 python-docx
+datasets
