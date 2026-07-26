@@ -38,6 +38,7 @@
 # print what it found and tell you to pass --src_col/--tgt_col explicitly.
 
 import argparse
+import gc
 import json
 import os
 import random
@@ -202,6 +203,82 @@ def print_metrics(m):
           f"F1={m['f1']:.4f}  Accuracy={m['accuracy']:.4f}")
 
 
+def _cache_path(output_path):
+    return os.path.join(os.path.dirname(output_path) or '.', 'translation_cache.json')
+
+
+def load_translation_cache(path, sample_size, seed):
+    """Load previously-computed translations so a crash mid-run doesn't lose progress."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        meta = data.get('meta', {})
+        if meta.get('sample_size') != sample_size or meta.get('seed') != seed:
+            print("  [!] Ignoring translation cache from a different --sample_size/--seed run")
+            return {}
+        return data.get('translations', {})
+    except Exception as e:
+        print(f"  [!] Could not read translation cache ({e}); starting fresh")
+        return {}
+
+
+def save_translation_cache(path, sample_size, seed, translations):
+    """Atomically persist the cache so a killed process leaves a valid (not truncated) file."""
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    tmp_path = path + '.tmp'
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        json.dump({'meta': {'sample_size': sample_size, 'seed': seed}, 'translations': translations},
+                   f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+
+
+def translate_with_checkpointing(app, hindi_sentences, cache_path, sample_size, seed):
+    """
+    Translate each sentence through app.translate_both_modes(), saving to disk
+    after every sentence. If the process is killed (e.g. OOM) partway through
+    a long run, re-running the identical command resumes from the cache
+    instead of re-translating everything from scratch.
+    """
+    cache = load_translation_cache(cache_path, sample_size, seed)
+    if cache:
+        print(f"  Resuming: {len(cache)}/{len(hindi_sentences)} translations already cached")
+
+    variant_translations = {'recommended': [], 'ebmt': [], 'nmt': []}
+    method_counts = {}
+
+    for i, h in enumerate(hindi_sentences):
+        key = str(i)
+        entry = cache.get(key)
+        if entry is None or entry.get('hindi') != h:
+            try:
+                result = app.translate_both_modes(h)
+                entry = {
+                    'hindi': h,
+                    'recommended': result['recommended']['translation'],
+                    'ebmt': result['ebmt']['translation'],
+                    'nmt': result['nmt']['translation'],
+                    'method': result['recommended']['method'],
+                }
+            except Exception as e:
+                print(f"  [!] Translation failed for sentence {i} ({e!r}); using empty placeholder")
+                entry = {'hindi': h, 'recommended': '', 'ebmt': '', 'nmt': '', 'method': 'Error'}
+            cache[key] = entry
+            save_translation_cache(cache_path, sample_size, seed, cache)
+
+        variant_translations['recommended'].append(entry['recommended'])
+        variant_translations['ebmt'].append(entry['ebmt'])
+        variant_translations['nmt'].append(entry['nmt'])
+        method_counts[entry['method']] = method_counts.get(entry['method'], 0) + 1
+
+        if (i + 1) % 5 == 0 or (i + 1) == len(hindi_sentences):
+            print(f"  Translated {i + 1}/{len(hindi_sentences)}")
+            gc.collect()
+
+    return variant_translations, method_counts
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate app.py's cross-language Hindi-Punjabi matcher on Samanantar (Precision/Recall/F1)"
@@ -239,17 +316,12 @@ def main():
 
     print(f"\n[3/4] Translating {len(pairs)} Hindi sentences "
           f"(Dictionary -> EBMT -> NMT cascade, plus EBMT-only and NMT-only)...")
-    variant_translations = {'recommended': [], 'ebmt': [], 'nmt': []}
-    method_counts = {}
-    for i, h in enumerate(hindi_sentences, 1):
-        result = app.translate_both_modes(h)
-        variant_translations['recommended'].append(result['recommended']['translation'])
-        variant_translations['ebmt'].append(result['ebmt']['translation'])
-        variant_translations['nmt'].append(result['nmt']['translation'])
-        method = result['recommended']['method']
-        method_counts[method] = method_counts.get(method, 0) + 1
-        if i % 25 == 0 or i == len(hindi_sentences):
-            print(f"  Translated {i}/{len(hindi_sentences)}")
+    cache_path = _cache_path(args.output)
+    print(f"  Progress is checkpointed to {cache_path} - if this run is interrupted "
+          f"(e.g. killed for memory), just re-run the same command to resume.")
+    variant_translations, method_counts = translate_with_checkpointing(
+        app, hindi_sentences, cache_path, args.sample_size, args.seed
+    )
 
     print(f"\nCascade method breakdown (which mode 'won' per query): {method_counts}")
     if not app.model_cache.get('loaded'):
