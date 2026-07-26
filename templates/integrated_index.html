@@ -2,73 +2,635 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hindi-Punjabi Translation &amp; Cross-Language Plagiarism Detection</title>
 <style>
-  body { font-family: Arial, sans-serif; max-width: 900px; margin: 30px auto; padding: 0 16px; color: #222; }
-  h1 { font-size: 22px; }
-  textarea { width: 100%; height: 100px; font-size: 16px; padding: 8px; box-sizing: border-box; }
-  button { margin-top: 10px; padding: 8px 16px; font-size: 15px; cursor: pointer; }
-  .row { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 16px; }
-  .card { flex: 1; min-width: 260px; border: 1px solid #ddd; border-radius: 6px; padding: 12px; }
-  .card h3 { margin-top: 0; }
-  pre { white-space: pre-wrap; word-break: break-word; background: #f7f7f7; padding: 8px; border-radius: 4px; }
-  label { font-size: 14px; }
+  :root {
+    --indigo: #4f46e5;
+    --indigo-dark: #3730a3;
+    --teal: #0d9488;
+    --green: #16a34a;
+    --amber: #d97706;
+    --red: #dc2626;
+    --bg: #f4f5fb;
+    --card: #ffffff;
+    --border: #e3e5f0;
+    --text: #1f2333;
+    --muted: #6b7280;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 0 0 60px 0;
+  }
+  header {
+    background: linear-gradient(135deg, var(--indigo), var(--indigo-dark));
+    color: #fff;
+    padding: 22px 28px;
+  }
+  header h1 { margin: 0 0 4px 0; font-size: 22px; }
+  header p { margin: 0; opacity: 0.85; font-size: 14px; }
+  .health-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-top: 12px; padding: 5px 12px; border-radius: 999px;
+    background: rgba(255,255,255,0.15); font-size: 12.5px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #a3a3a3; }
+  .dot.on { background: #4ade80; }
+  .dot.off { background: #fbbf24; }
+
+  .container { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  nav.tabs {
+    display: flex; gap: 4px; margin-top: 20px; border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  nav.tabs button {
+    background: none; border: none; padding: 12px 18px; font-size: 14.5px;
+    cursor: pointer; color: var(--muted); border-bottom: 3px solid transparent;
+    font-weight: 600;
+  }
+  nav.tabs button.active { color: var(--indigo); border-bottom-color: var(--indigo); }
+
+  .tab-panel { display: none; padding-top: 22px; }
+  .tab-panel.active { display: block; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px 20px; margin-bottom: 16px;
+  }
+  .card h2 { margin: 0 0 4px 0; font-size: 16px; }
+  .card .hint { color: var(--muted); font-size: 13px; margin: 0 0 14px 0; }
+
+  textarea {
+    width: 100%; min-height: 90px; font-size: 15px; padding: 10px; border-radius: 8px;
+    border: 1px solid var(--border); font-family: inherit; resize: vertical;
+  }
+  input[type=text], input[type=file] {
+    font-size: 14px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+    font-family: inherit;
+  }
+  label.check { font-size: 13.5px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; margin: 10px 0; }
+
+  button.primary {
+    background: var(--indigo); color: #fff; border: none; padding: 10px 20px;
+    border-radius: 8px; font-size: 14.5px; font-weight: 600; cursor: pointer; margin-top: 6px;
+  }
+  button.primary:hover { background: var(--indigo-dark); }
+  button.primary:disabled { opacity: 0.6; cursor: default; }
+  button.secondary {
+    background: #fff; color: var(--indigo); border: 1px solid var(--indigo);
+    padding: 9px 18px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  button.danger { background: #fff; color: var(--red); border: 1px solid var(--red); padding: 5px 10px; border-radius: 6px; font-size: 12.5px; cursor: pointer; }
+
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 760px) { .grid3, .grid4 { grid-template-columns: 1fr 1fr; } }
+
+  .metric-box { background: #f8f9fd; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  .metric-box .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+  .metric-box .value { font-size: 22px; font-weight: 700; margin-top: 2px; }
+
+  .badge {
+    display: inline-block; font-size: 11.5px; font-weight: 600; padding: 2px 9px;
+    border-radius: 999px; margin-right: 6px;
+  }
+  .badge.blue { background: #e0e7ff; color: var(--indigo-dark); }
+  .badge.teal { background: #ccfbf1; color: #0f766e; }
+  .badge.green { background: #dcfce7; color: #15803d; }
+  .badge.amber { background: #fef3c7; color: #92400e; }
+  .badge.red { background: #fee2e2; color: #b91c1c; }
+  .badge.gray { background: #f1f2f6; color: var(--muted); }
+
+  .sim-bar-wrap { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .sim-bar-track { flex: 1; height: 8px; border-radius: 999px; background: #eceefa; overflow: hidden; }
+  .sim-bar-fill { height: 100%; border-radius: 999px; }
+  .sim-bar-pct { font-size: 12.5px; font-weight: 700; width: 42px; text-align: right; }
+
+  .match-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+  .match-card .title-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .match-card .title-row a { color: var(--indigo); text-decoration: none; font-weight: 600; }
+  .match-card .title-row a:hover { text-decoration: underline; }
+  .match-card .preview { font-size: 13.5px; color: #374151; margin-top: 6px; }
+  .match-card .url { font-size: 12px; color: var(--muted); word-break: break-all; }
+
+  .lang-bar-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; font-size: 13px; }
+  .lang-bar-row .name { width: 80px; color: var(--muted); }
+  .lang-bar-row .track { flex: 1; height: 10px; background: #eceefa; border-radius: 999px; overflow: hidden; }
+  .lang-bar-row .fill { height: 100%; background: var(--teal); }
+  .lang-bar-row .count { width: 30px; text-align: right; font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  table th, table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  table th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+
+  .status-msg { font-size: 13.5px; padding: 8px 12px; border-radius: 8px; margin-top: 10px; }
+  .status-msg.ok { background: #dcfce7; color: #15803d; }
+  .status-msg.err { background: #fee2e2; color: #b91c1c; }
+
+  .loading { font-size: 13.5px; color: var(--muted); margin-top: 10px; }
+  .empty-state { color: var(--muted); font-size: 13.5px; padding: 10px 0; }
+  .drop-zone {
+    border: 2px dashed var(--border); border-radius: 10px; padding: 26px; text-align: center;
+    color: var(--muted); font-size: 13.5px; cursor: pointer;
+  }
+  .drop-zone.drag { border-color: var(--indigo); background: #f5f6ff; }
+  .filename-chip { display: inline-block; margin-top: 8px; font-size: 13px; background: #eef0fb; padding: 4px 10px; border-radius: 6px; }
+
+  .section-title { font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 18px 0 8px 0; }
 </style>
 </head>
 <body>
-  <h1>Hindi-Punjabi Translation + Cross-Language Plagiarism Detection</h1>
-  <p>Enter Hindi text below. Translation runs in <strong>both modes</strong> (EBMT and NMT) and the
-     best available result is used for cross-language plagiarism detection.</p>
 
-  <textarea id="hindiText" placeholder="यहाँ हिंदी टेक्स्ट लिखें..."></textarea><br>
-  <label><input type="checkbox" id="sentenceSearch" checked> Use sentence-based internet search</label><br>
-  <button onclick="runCompare()">Compare Translation Modes</button>
-  <button onclick="runPlagiarismCheck()">Run Plagiarism Check</button>
+<header>
+  <div class="container">
+    <h1>Hindi-Punjabi Translation &amp; Cross-Language Plagiarism Detection</h1>
+    <p>Dictionary → EBMT → NMT translation cascade, with both EBMT and NMT modes shown in the final output, feeding corpus and internet plagiarism matching.</p>
+    <div class="health-pill" id="healthPill"><span class="dot" id="healthDot"></span><span id="healthText">Checking system status…</span></div>
+  </div>
+</header>
 
-  <div class="row">
+<div class="container">
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="translate">Translate &amp; Compare</button>
+    <button class="tab-btn" data-tab="check">Plagiarism Check</button>
+    <button class="tab-btn" data-tab="upload">Upload Document</button>
+    <button class="tab-btn" data-tab="corpus">Corpus Manager</button>
+  </nav>
+
+  <!-- ============ TAB: TRANSLATE & COMPARE ============ -->
+  <div class="tab-panel active" id="tab-translate">
     <div class="card">
-      <h3>EBMT Output</h3>
-      <pre id="ebmtOut">-</pre>
+      <h2>Translate Hindi → Punjabi</h2>
+      <p class="hint">Runs Dictionary, EBMT and NMT independently and shows both translation modes side-by-side, plus their agreement metrics.</p>
+      <textarea id="translateInput" placeholder="यहाँ हिंदी टेक्स्ट लिखें... (e.g. मुझे पानी चाहिए.)"></textarea>
+      <br>
+      <button class="primary" id="btnCompare" onclick="runCompare()">Compare Both Modes</button>
+      <div class="loading" id="compareLoading" style="display:none;">Translating…</div>
     </div>
+    <div id="compareResult"></div>
+  </div>
+
+  <!-- ============ TAB: PLAGIARISM CHECK (TEXT) ============ -->
+  <div class="tab-panel" id="tab-check">
     <div class="card">
-      <h3>NMT Output</h3>
-      <pre id="nmtOut">-</pre>
+      <h2>Plagiarism Check — Text Input</h2>
+      <p class="hint">Translates the Hindi input (both modes), then matches the translated Punjabi against the local corpus and the internet.</p>
+      <textarea id="checkInput" placeholder="यहाँ हिंदी टेक्स्ट लिखें..."></textarea><br>
+      <label class="check"><input type="checkbox" id="checkSentenceSearch" checked> Use sentence-based internet search</label><br>
+      <button class="primary" id="btnCheck" onclick="runPlagiarismCheck()">Run Plagiarism Check</button>
+      <div class="loading" id="checkLoading" style="display:none;">Running translation + corpus + internet search…</div>
+    </div>
+    <div id="checkResult"></div>
+  </div>
+
+  <!-- ============ TAB: UPLOAD DOCUMENT ============ -->
+  <div class="tab-panel" id="tab-upload">
+    <div class="card">
+      <h2>Check a Document for Plagiarism</h2>
+      <p class="hint">Upload a .txt, .pdf, .docx or .doc file. The extracted text runs through the full translation + corpus + internet pipeline.</p>
+      <div class="drop-zone" id="dropZonePlag">Drag &amp; drop a file here, or click to choose one<br><input type="file" id="fileInputPlag" accept=".txt,.pdf,.docx,.doc" style="display:none;"></div>
+      <div id="filenameChipPlag"></div>
+      <label class="check"><input type="checkbox" id="uploadSentenceSearch" checked> Use sentence-based internet search</label><br>
+      <button class="primary" id="btnUploadCheck" onclick="runUploadPlagiarism()">Upload &amp; Check</button>
+      <div class="loading" id="uploadCheckLoading" style="display:none;">Extracting text and running full check…</div>
+    </div>
+    <div id="uploadCheckResult"></div>
+
+    <div class="card">
+      <h2>Add a Document to the Corpus</h2>
+      <p class="hint">Adds this document to the reference corpus used for future plagiarism matching.</p>
+      <div class="drop-zone" id="dropZoneCorpus">Drag &amp; drop a file here, or click to choose one<br><input type="file" id="fileInputCorpus" accept=".txt,.pdf,.docx,.doc" style="display:none;"></div>
+      <div id="filenameChipCorpus"></div>
+      <br>
+      <input type="text" id="corpusTitle" placeholder="Title (optional)">
+      <input type="text" id="corpusTags" placeholder="Tags, comma separated (optional)">
+      <br>
+      <button class="primary" id="btnUploadCorpus" onclick="runUploadCorpus()">Add to Corpus</button>
+      <div id="uploadCorpusStatus"></div>
     </div>
   </div>
 
-  <div class="card" style="margin-top:16px;">
-    <h3>Result</h3>
-    <pre id="resultOut">-</pre>
+  <!-- ============ TAB: CORPUS MANAGER ============ -->
+  <div class="tab-panel" id="tab-corpus">
+    <div class="card">
+      <h2>Corpus Statistics</h2>
+      <div class="grid4" id="corpusStatsGrid">
+        <div class="metric-box"><div class="label">Documents</div><div class="value" id="statTotalDocs">–</div></div>
+        <div class="metric-box"><div class="label">Total Words</div><div class="value" id="statTotalWords">–</div></div>
+        <div class="metric-box"><div class="label">Languages</div><div class="value" id="statLangCount">–</div></div>
+        <div class="metric-box"><div class="label">Last Updated</div><div class="value" id="statLastUpdated" style="font-size:13px;">–</div></div>
+      </div>
+      <div class="section-title">Language Distribution</div>
+      <div id="langDistChart"><div class="empty-state">No data yet.</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Documents <button class="secondary" style="float:right;" onclick="loadCorpus()">Refresh</button></h2>
+      <div id="corpusTableWrap"><div class="empty-state">Loading…</div></div>
+    </div>
   </div>
+</div>
 
 <script>
-async function runCompare() {
-  const hindi_text = document.getElementById('hindiText').value;
-  const res = await fetch('/api/translate/compare', {
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function simColor(v) {
+  if (v >= 0.8) return 'var(--red)';
+  if (v >= 0.6) return 'var(--amber)';
+  return 'var(--green)';
+}
+
+function simBar(value, opts) {
+  opts = opts || {};
+  const v = (value === null || value === undefined) ? 0 : value;
+  const pct = Math.max(0, Math.min(1, v)) * 100;
+  const label = opts.label || '';
+  return `
+    <div class="sim-bar-wrap">
+      ${label ? `<span style="font-size:12.5px;color:var(--muted);min-width:${opts.labelWidth || 70}px;">${escapeHtml(label)}</span>` : ''}
+      <div class="sim-bar-track"><div class="sim-bar-fill" style="width:${pct.toFixed(1)}%; background:${simColor(v)};"></div></div>
+      <span class="sim-bar-pct">${pct.toFixed(0)}%</span>
+    </div>`;
+}
+
+function badge(text, kind) {
+  return `<span class="badge ${kind || 'gray'}">${escapeHtml(text)}</span>`;
+}
+
+async function postJSON(url, body) {
+  const res = await fetch(url, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({hindi_text})
+    body: JSON.stringify(body)
   });
-  const data = await res.json();
-  document.getElementById('ebmtOut').textContent = JSON.stringify(data.ebmt, null, 2);
-  document.getElementById('nmtOut').textContent = JSON.stringify(data.nmt, null, 2);
-  document.getElementById('resultOut').textContent = JSON.stringify(data, null, 2);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || data.message || ('Request failed: ' + res.status));
+  return data;
+}
+
+async function postForm(url, formData) {
+  const res = await fetch(url, { method: 'POST', body: formData });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || data.message || ('Request failed: ' + res.status));
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// Tabs
+// ---------------------------------------------------------------------------
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'corpus') { loadCorpus(); loadCorpusStats(); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Health banner
+// ---------------------------------------------------------------------------
+async function loadHealth() {
+  try {
+    const res = await fetch('/health');
+    const h = await res.json();
+    const dot = document.getElementById('healthDot');
+    const text = document.getElementById('healthText');
+    if (h.models_loaded) {
+      dot.className = 'dot on';
+      text.textContent = `NMT + semantic models loaded (${h.semantic_model_source || 'unknown source'}) · Dictionary: ${h.dictionary_size} pairs · EBMT corpus: ${h.ebmt_corpus_size} pairs · ${h.corpus_size} corpus docs`;
+    } else {
+      dot.className = 'dot off';
+      text.textContent = `Running in Dictionary + EBMT fallback mode (NMT model not loaded) · Dictionary: ${h.dictionary_size} pairs · EBMT corpus: ${h.ebmt_corpus_size} pairs · ${h.corpus_size} corpus docs`;
+    }
+  } catch (e) {
+    document.getElementById('healthText').textContent = 'Could not reach server health endpoint.';
+  }
+}
+loadHealth();
+
+// ---------------------------------------------------------------------------
+// Translation modes rendering (shared by Translate tab and Plagiarism Check tab)
+// ---------------------------------------------------------------------------
+function methodBadge(method) {
+  const map = { Dictionary: 'blue', EBMT: 'teal', NMT: 'green', None: 'gray' };
+  return badge(method, map[method] || 'gray');
+}
+
+function renderModesHtml(modes) {
+  const dict = modes.dictionary || {};
+  const ebmt = modes.ebmt || {};
+  const nmt = modes.nmt || {};
+  const agreement = modes.agreement || {};
+  const rec = modes.recommended || {};
+
+  return `
+    <div class="card">
+      <h2>Recommended Output ${methodBadge(rec.method)}</h2>
+      <p style="font-size:16px; margin:6px 0 0 0;">${escapeHtml(rec.translation)}</p>
+    </div>
+    <div class="grid3">
+      <div class="card">
+        <h2>Dictionary ${badge(dict.covered_fully ? 'Full coverage' : (dict.untranslated_words + ' word(s) missed'), dict.covered_fully ? 'green' : 'amber')}</h2>
+        <p style="font-size:14.5px;">${escapeHtml(dict.translation)}</p>
+      </div>
+      <div class="card">
+        <h2>EBMT Mode</h2>
+        <p style="font-size:14.5px;">${escapeHtml(ebmt.translation)}</p>
+        ${simBar(ebmt.similarity, {label: 'Corpus similarity'})}
+      </div>
+      <div class="card">
+        <h2>NMT Mode</h2>
+        <p style="font-size:14.5px;">${escapeHtml(nmt.translation)}</p>
+        ${nmt.confidence !== null && nmt.confidence >= 0 ? simBar(nmt.confidence, {label: 'Confidence'}) : '<p class="empty-state">Not available (model not loaded)</p>'}
+      </div>
+    </div>
+    <div class="card">
+      <h2>Agreement Between EBMT and NMT</h2>
+      <p class="hint">How closely the two independent translation modes agree with each other — useful for the thesis evaluation chapter.</p>
+      <div class="grid3">
+        <div class="metric-box"><div class="label">BLEU (EBMT vs NMT)</div><div class="value">${agreement.bleu_ebmt_vs_nmt !== null && agreement.bleu_ebmt_vs_nmt !== undefined ? agreement.bleu_ebmt_vs_nmt.toFixed(1) : 'N/A'}</div></div>
+        <div class="metric-box"><div class="label">Semantic Similarity</div><div class="value">${agreement.semantic_similarity_ebmt_vs_nmt !== null && agreement.semantic_similarity_ebmt_vs_nmt !== undefined ? (agreement.semantic_similarity_ebmt_vs_nmt * 100).toFixed(0) + '%' : 'N/A'}</div></div>
+        <div class="metric-box"><div class="label">Recommended Method</div><div class="value" style="font-size:16px;">${escapeHtml(rec.method)}</div></div>
+      </div>
+    </div>`;
+}
+
+async function runCompare() {
+  const hindiText = document.getElementById('translateInput').value.trim();
+  const out = document.getElementById('compareResult');
+  const loading = document.getElementById('compareLoading');
+  if (!hindiText) { out.innerHTML = `<div class="status-msg err">Please enter some Hindi text.</div>`; return; }
+  document.getElementById('btnCompare').disabled = true;
+  loading.style.display = 'block';
+  out.innerHTML = '';
+  try {
+    const data = await postJSON('/api/translate/compare', {hindi_text: hindiText});
+    out.innerHTML = renderModesHtml(data);
+  } catch (e) {
+    out.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
+  } finally {
+    loading.style.display = 'none';
+    document.getElementById('btnCompare').disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Plagiarism results rendering (shared by text-check and upload-check)
+// ---------------------------------------------------------------------------
+function renderCorpusMatch(m) {
+  return `
+    <div class="match-card">
+      <div class="title-row">
+        <span>${escapeHtml(m.metadata && m.metadata.title ? m.metadata.title : m.filename)}</span>
+        ${m.is_cross_language ? badge('Cross-Language', 'blue') : ''}
+        ${badge(m.metadata && m.metadata.language ? m.metadata.language : 'unknown', 'gray')}
+      </div>
+      ${simBar(m.similarity, {label: 'Similarity'})}
+      <div class="preview">${escapeHtml(m.content_preview)}</div>
+    </div>`;
+}
+
+function renderInternetMatch(m) {
+  return `
+    <div class="match-card">
+      <div class="title-row">
+        <a href="${escapeHtml(m.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(m.title || m.url)}</a>
+        ${badge(m.search_method || 'unknown', m.search_method === 'simulated' ? 'amber' : 'teal')}
+      </div>
+      <div class="url">${escapeHtml(m.url)}</div>
+      ${simBar(m.similarity, {label: 'Similarity'})}
+      <div class="preview">${escapeHtml(m.snippet)}</div>
+    </div>`;
+}
+
+function renderPlagiarismResult(data) {
+  const summary = data.plagiarism_summary || {};
+  const corpus = data.corpus_results || {matches: []};
+  const internet = data.internet_results || {matches: []};
+
+  let html = '';
+  html += `
+    <div class="card">
+      <h2>Summary ${summary.plagiarism_detected ? badge('Matches found', 'amber') : badge('No matches found', 'green')}</h2>
+      <div class="grid4">
+        <div class="metric-box"><div class="label">Total Matches</div><div class="value">${summary.total_matches}</div></div>
+        <div class="metric-box"><div class="label">Corpus Matches</div><div class="value">${summary.corpus_matches}</div></div>
+        <div class="metric-box"><div class="label">Internet Matches</div><div class="value">${summary.internet_matches}</div></div>
+        <div class="metric-box"><div class="label">Processing Time</div><div class="value">${data.processing_time}s</div></div>
+      </div>
+      ${simBar(summary.overall_similarity, {label: 'Overall similarity', labelWidth: 110})}
+    </div>
+    <div class="card">
+      <h2>Translation Used (${escapeHtml(data.translation_method)}) ${methodBadge(data.translation_method)}</h2>
+      <p style="font-size:14.5px;">${escapeHtml(data.translated_punjabi)}</p>
+    </div>`;
+
+  if (data.translation_modes) {
+    html += renderModesHtml(data.translation_modes);
+  }
+
+  html += `<div class="card"><h2>Corpus Matches (${corpus.total_matches})</h2>`;
+  if (corpus.matches && corpus.matches.length) {
+    html += corpus.matches.map(renderCorpusMatch).join('');
+  } else {
+    html += `<div class="empty-state">No corpus matches above threshold.</div>`;
+  }
+  html += `</div>`;
+
+  html += `<div class="card"><h2>Internet Matches (${internet.total_matches}) ${badge(internet.search_method, 'blue')}</h2>`;
+  if (internet.matches && internet.matches.length) {
+    html += internet.matches.slice(0, 15).map(renderInternetMatch).join('');
+  } else {
+    html += `<div class="empty-state">No internet matches found.</div>`;
+  }
+  html += `</div>`;
+
+  return html;
 }
 
 async function runPlagiarismCheck() {
-  const hindi_text = document.getElementById('hindiText').value;
-  const use_sentence_search = document.getElementById('sentenceSearch').checked;
-  const res = await fetch('/api/plagiarism-check/text', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({hindi_text, use_sentence_search})
-  });
-  const data = await res.json();
-  if (data.translation_modes) {
-    document.getElementById('ebmtOut').textContent = JSON.stringify(data.translation_modes.ebmt, null, 2);
-    document.getElementById('nmtOut').textContent = JSON.stringify(data.translation_modes.nmt, null, 2);
+  const hindiText = document.getElementById('checkInput').value.trim();
+  const useSentenceSearch = document.getElementById('checkSentenceSearch').checked;
+  const out = document.getElementById('checkResult');
+  const loading = document.getElementById('checkLoading');
+  if (!hindiText) { out.innerHTML = `<div class="status-msg err">Please enter some Hindi text.</div>`; return; }
+  document.getElementById('btnCheck').disabled = true;
+  loading.style.display = 'block';
+  out.innerHTML = '';
+  try {
+    const data = await postJSON('/api/plagiarism-check/text', {hindi_text: hindiText, use_sentence_search: useSentenceSearch});
+    out.innerHTML = renderPlagiarismResult(data);
+  } catch (e) {
+    out.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
+  } finally {
+    loading.style.display = 'none';
+    document.getElementById('btnCheck').disabled = false;
   }
-  document.getElementById('resultOut').textContent = JSON.stringify(data, null, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Upload: plagiarism check
+// ---------------------------------------------------------------------------
+function wireDropZone(zoneId, inputId, chipId) {
+  const zone = document.getElementById(zoneId);
+  const input = document.getElementById(inputId);
+  const chip = document.getElementById(chipId);
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault();
+    zone.classList.remove('drag');
+    if (e.dataTransfer.files.length) {
+      input.files = e.dataTransfer.files;
+      chip.innerHTML = `<span class="filename-chip">${escapeHtml(input.files[0].name)}</span>`;
+    }
+  });
+  input.addEventListener('change', () => {
+    if (input.files.length) {
+      chip.innerHTML = `<span class="filename-chip">${escapeHtml(input.files[0].name)}</span>`;
+    }
+  });
+}
+wireDropZone('dropZonePlag', 'fileInputPlag', 'filenameChipPlag');
+wireDropZone('dropZoneCorpus', 'fileInputCorpus', 'filenameChipCorpus');
+
+async function runUploadPlagiarism() {
+  const input = document.getElementById('fileInputPlag');
+  const out = document.getElementById('uploadCheckResult');
+  const loading = document.getElementById('uploadCheckLoading');
+  if (!input.files.length) { out.innerHTML = `<div class="status-msg err">Please choose a file first.</div>`; return; }
+  const useSentenceSearch = document.getElementById('uploadSentenceSearch').checked;
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  fd.append('use_sentence_search', useSentenceSearch ? 'true' : 'false');
+
+  document.getElementById('btnUploadCheck').disabled = true;
+  loading.style.display = 'block';
+  out.innerHTML = '';
+  try {
+    const data = await postForm('/api/upload/plagiarism-check', fd);
+    out.innerHTML = `<div class="status-msg ok">Analyzed "${escapeHtml(data.filename)}" — ${data.word_count} words, ${data.character_count} characters.</div>` + renderPlagiarismResult(data);
+  } catch (e) {
+    out.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
+  } finally {
+    loading.style.display = 'none';
+    document.getElementById('btnUploadCheck').disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Upload: add to corpus
+// ---------------------------------------------------------------------------
+async function runUploadCorpus() {
+  const input = document.getElementById('fileInputCorpus');
+  const statusEl = document.getElementById('uploadCorpusStatus');
+  if (!input.files.length) { statusEl.innerHTML = `<div class="status-msg err">Please choose a file first.</div>`; return; }
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  fd.append('title', document.getElementById('corpusTitle').value);
+  const tags = document.getElementById('corpusTags').value.split(',').map(t => t.trim()).filter(Boolean);
+  tags.forEach(t => fd.append('tags', t));
+
+  document.getElementById('btnUploadCorpus').disabled = true;
+  statusEl.innerHTML = `<div class="loading">Uploading and embedding…</div>`;
+  try {
+    const data = await postForm('/api/upload/corpus', fd);
+    statusEl.innerHTML = `<div class="status-msg ${data.success ? 'ok' : 'err'}">${escapeHtml(data.message || data.error)} (corpus size: ${data.corpus_size})</div>`;
+  } catch (e) {
+    statusEl.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
+  } finally {
+    document.getElementById('btnUploadCorpus').disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Corpus manager tab
+// ---------------------------------------------------------------------------
+async function loadCorpusStats() {
+  const grid = document.getElementById('corpusStatsGrid');
+  const chart = document.getElementById('langDistChart');
+  try {
+    const res = await fetch('/api/corpus/stats');
+    const s = await res.json();
+    document.getElementById('statTotalDocs').textContent = s.total_documents ?? 0;
+    document.getElementById('statTotalWords').textContent = s.total_words ?? 0;
+    const dist = s.language_distribution || {};
+    document.getElementById('statLangCount').textContent = Object.keys(dist).length;
+    document.getElementById('statLastUpdated').textContent = s.last_updated ? new Date(s.last_updated).toLocaleString() : 'Never';
+
+    const total = Object.values(dist).reduce((a, b) => a + b, 0) || 1;
+    if (Object.keys(dist).length === 0) {
+      chart.innerHTML = `<div class="empty-state">No documents in corpus yet.</div>`;
+    } else {
+      chart.innerHTML = Object.entries(dist).map(([lang, count]) => `
+        <div class="lang-bar-row">
+          <span class="name">${escapeHtml(lang)}</span>
+          <div class="track"><div class="fill" style="width:${(count / total * 100).toFixed(1)}%;"></div></div>
+          <span class="count">${count}</span>
+        </div>`).join('');
+    }
+  } catch (e) {
+    chart.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function loadCorpus() {
+  const wrap = document.getElementById('corpusTableWrap');
+  wrap.innerHTML = `<div class="empty-state">Loading…</div>`;
+  try {
+    const res = await fetch('/api/corpus/list');
+    const data = await res.json();
+    const docs = data.documents || [];
+    if (!docs.length) {
+      wrap.innerHTML = `<div class="empty-state">No documents in the corpus yet. Add one from the "Upload Document" tab.</div>`;
+      return;
+    }
+    wrap.innerHTML = `
+      <table>
+        <thead><tr><th>Title</th><th>Language</th><th>Words</th><th>Added</th><th></th></tr></thead>
+        <tbody>
+          ${docs.map(d => `
+            <tr>
+              <td>${escapeHtml(d.title)}</td>
+              <td>${badge(d.language, 'gray')}</td>
+              <td>${d.word_count}</td>
+              <td>${d.date_added ? new Date(d.date_added).toLocaleDateString() : ''}</td>
+              <td><button class="danger" onclick="deleteCorpusDoc('${encodeURIComponent(d.filename)}')">Delete</button></td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch (e) {
+    wrap.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function deleteCorpusDoc(encodedFilename) {
+  const filename = decodeURIComponent(encodedFilename);
+  if (!confirm(`Delete "${filename}" from the corpus?`)) return;
+  try {
+    await postJSON('/api/corpus/delete', {filename});
+    loadCorpus();
+    loadCorpusStats();
+  } catch (e) {
+    alert(e.message);
+  }
 }
 </script>
 </body>

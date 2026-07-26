@@ -1412,8 +1412,10 @@ def upload_document_plagiarism():
     """
     Upload document for plagiarism detection
 
-    Accepts: File upload
-    Process: Extract text → Translate → Check plagiarism
+    Accepts: File upload (+ optional use_sentence_search form field)
+    Process: Extract text → Translate (both modes) → Corpus check → Internet search
+    Runs the exact same pipeline as /api/plagiarism-check/text, so uploaded
+    documents get full corpus and internet matching, not just a preview.
     """
     try:
         # Check file
@@ -1428,6 +1430,8 @@ def upload_document_plagiarism():
         if not allowed_file(file.filename):
             return jsonify({'success': False, 'error': f'File type not allowed. Allowed: {", ".join(app.config["ALLOWED_EXTENSIONS"])}'}), 400
 
+        use_sentence_search = request.form.get('use_sentence_search', 'true').lower() != 'false'
+
         # Save uploaded file
         filename = secure_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
@@ -1438,29 +1442,18 @@ def upload_document_plagiarism():
         # Extract text from file
         content = extract_text_from_file(filepath)
 
-        if not content:
+        # Clean up the uploaded file immediately - we only need the extracted text
+        os.remove(filepath)
+
+        if not content or not content.strip():
             return jsonify({'success': False, 'error': 'Could not extract text from file'}), 400
 
-        # Process for plagiarism detection
         print(f"✅ Document extracted: {len(content)} characters")
 
-        # Detect language
-        detected_lang = corpus_manager.detect_language(content)
-        print(f"🗣️ Detected language: {detected_lang}")
-
-        # Prepare response data
-        response_data = {
-            'success': True,
-            'filename': filename,
-            'content_preview': content[:500] + "..." if len(content) > 500 else content,
-            'language': detected_lang,
-            'character_count': len(content),
-            'word_count': len(content.split()),
-            'ready_for_analysis': True
-        }
-
-        # Clean up
-        os.remove(filepath)
+        response_data = run_plagiarism_pipeline(content, use_sentence_search)
+        response_data['filename'] = filename
+        response_data['character_count'] = len(content)
+        response_data['word_count'] = len(content.split())
 
         return jsonify(response_data)
 
@@ -1529,6 +1522,114 @@ def upload_document_corpus():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -> Dict:
+    """
+    Core plagiarism-check pipeline shared by the text-input and
+    document-upload endpoints: translate (both EBMT and NMT modes) → corpus
+    matching → sentence-based internet search → summary + DB logging.
+    """
+    print("\n" + "=" * 80)
+    print("PLAGIARISM CHECK STARTED")
+    print("=" * 80)
+
+    start_time = datetime.now()
+
+    # =========== STEP 1: TRANSLATE (BOTH MODES) ===========
+    print("\n[STEP 1] HINDI TO PUNJABI TRANSLATION (DICTIONARY + EBMT + NMT)")
+    print("-" * 80)
+
+    both_modes = translate_both_modes(hindi_text)
+    translated_punjabi = both_modes['recommended']['translation']
+    translation_method = both_modes['recommended']['method']
+
+    # =========== STEP 2: CORPUS PLAGIARISM CHECK ===========
+    print("\n[STEP 2] CROSS-LANGUAGE PLAGIARISM CHECK - CORPUS")
+    print("-" * 80)
+
+    corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
+
+    # =========== STEP 3: INTERNET SEARCH (GOOGLE) WITH SENTENCE-BASED APPROACH ===========
+    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED FOR TRANSLATED CONTENT")
+    print("-" * 80)
+
+    internet_matches = search_internet_google(translated_punjabi, max_results=30, use_sentence_search=use_sentence_search)
+
+    #=========== PREPARE RESPONSE ===========
+    processing_time = (datetime.now() - start_time).total_seconds()
+    response_data = {
+        'success': True,
+        'original_hindi': hindi_text,
+        'translated_punjabi': translated_punjabi,
+        'translation_method': translation_method,
+
+        # Both translation modes (EBMT + NMT), shown side-by-side so the
+        # final output is not limited to a single cascade winner.
+        'translation_modes': both_modes,
+
+        # Corpus Results
+        'corpus_results': {
+            'total_matches': len(corpus_matches),
+            'matches': corpus_matches[:5],
+            'max_similarity': max([m['similarity'] for m in corpus_matches], default=0)
+        },
+
+        # Internet Results
+        'internet_results': {
+            'total_matches': len(internet_matches),
+            'matches': internet_matches[:40],
+            'max_similarity': max([m['similarity'] for m in internet_matches], default=0),
+            'search_method': 'sentence-based' if use_sentence_search else 'keyword-based'
+        },
+
+        # Summary
+        'plagiarism_summary': {
+            'total_matches': len(corpus_matches) + len(internet_matches),
+            'corpus_matches': len(corpus_matches),
+            'internet_matches': len(internet_matches),
+            'highest_corpus_similarity': max([m['similarity'] for m in corpus_matches], default=0),
+            'highest_internet_similarity': max([m['similarity'] for m in internet_matches], default=0),
+            'overall_similarity': max(
+                max([m['similarity'] for m in corpus_matches], default=0),
+                max([m['similarity'] for m in internet_matches], default=0)
+            ),
+            'plagiarism_detected': len(corpus_matches) > 0 or len(internet_matches) > 0
+        },
+        'processing_time': round(processing_time, 2)
+    }
+
+    print("\n" + "=" * 80)
+    print("PROCESSING COMPLETED")
+    print("=" * 80)
+    print(f"Total Matches: {response_data['plagiarism_summary']['total_matches']}")
+    print(f"Processing Time: {processing_time:.2f}s")
+
+    # Save to database
+    try:
+        conn = sqlite3.connect('corpus_database.db')
+        cursor = conn.cursor()
+
+        cursor.execute('''INSERT INTO plagiarism_checks
+            (query_content, query_language, translated_content, total_corpus_docs,
+            corpus_matches, max_corpus_similarity, internet_matches,
+            max_internet_similarity, processing_time, results_json, search_method)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (hindi_text, 'hindi', translated_punjabi, corpus_manager.corpus_cache.get('corpus_size', 0),
+            len(corpus_matches),
+            response_data['plagiarism_summary']['highest_corpus_similarity'],
+            len(internet_matches),
+            response_data['plagiarism_summary']['highest_internet_similarity'],
+            processing_time,
+            json.dumps(response_data),
+            'sentence-based' if use_sentence_search else 'keyword-based'))
+
+        conn.commit()
+        conn.close()
+
+    except Exception as e:
+        print(f"⚠️ Database save error: {e}")
+
+    return response_data
+
 @app.route('/api/plagiarism-check/text', methods=['POST'])
 def plagiarism_check_text():
     """
@@ -1545,107 +1646,7 @@ def plagiarism_check_text():
         if not hindi_text:
             return jsonify({'error': 'No Hindi text provided'}), 400
 
-        print("\n" + "=" * 80)
-        print("PLAGIARISM CHECK STARTED")
-        print("=" * 80)
-
-        start_time = datetime.now()
-
-        # =========== STEP 1: TRANSLATE (BOTH MODES) ===========
-        print("\n[STEP 1] HINDI TO PUNJABI TRANSLATION (DICTIONARY + EBMT + NMT)")
-        print("-" * 80)
-
-        both_modes = translate_both_modes(hindi_text)
-        translated_punjabi = both_modes['recommended']['translation']
-        translation_method = both_modes['recommended']['method']
-
-        # =========== STEP 2: CORPUS PLAGIARISM CHECK ===========
-        print("\n[STEP 2] CROSS-LANGUAGE PLAGIARISM CHECK - CORPUS")
-        print("-" * 80)
-
-        corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
-
-        # =========== STEP 3: INTERNET SEARCH (GOOGLE) WITH SENTENCE-BASED APPROACH ===========
-        print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED FOR TRANSLATED CONTENT")
-        print("-" * 80)
-
-        internet_matches = search_internet_google(translated_punjabi, max_results=30, use_sentence_search=use_sentence_search)
-
-         #=========== PREPARE RESPONSE ===========
-        processing_time = (datetime.now() - start_time).total_seconds()
-        response_data = {
-            'success': True,
-            'original_hindi': hindi_text,
-            'translated_punjabi': translated_punjabi,
-            'translation_method': translation_method,
-
-            # Both translation modes (EBMT + NMT), shown side-by-side so the
-            # final output is not limited to a single cascade winner.
-            'translation_modes': both_modes,
-
-            # Corpus Results
-            'corpus_results': {
-                'total_matches': len(corpus_matches),
-                'matches': corpus_matches[:5],
-                'max_similarity': max([m['similarity'] for m in corpus_matches], default=0)
-            },
-
-            # Internet Results
-            'internet_results': {
-                'total_matches': len(internet_matches),
-                'matches': internet_matches[:40],
-                'max_similarity': max([m['similarity'] for m in internet_matches], default=0),
-                'search_method': 'sentence-based' if use_sentence_search else 'keyword-based'
-            },
-
-            # Summary
-            'plagiarism_summary': {
-                'total_matches': len(corpus_matches) + len(internet_matches),
-                'corpus_matches': len(corpus_matches),
-                'internet_matches': len(internet_matches),
-                'highest_corpus_similarity': max([m['similarity'] for m in corpus_matches], default=0),
-                'highest_internet_similarity': max([m['similarity'] for m in internet_matches], default=0),
-                'overall_similarity': max(
-                    max([m['similarity'] for m in corpus_matches], default=0),
-                    max([m['similarity'] for m in internet_matches], default=0)
-                ),
-                'plagiarism_detected': len(corpus_matches) > 0 or len(internet_matches) > 0
-            },
-            'processing_time': round(processing_time, 2)
-        }
-
-        print("\n" + "=" * 80)
-        print("PROCESSING COMPLETED")
-        print("=" * 80)
-        print(f"Total Matches: {response_data['plagiarism_summary']['total_matches']}")
-        print(f"Processing Time: {processing_time:.2f}s")
-
-        # Save to database
-        try:
-            conn = sqlite3.connect('corpus_database.db')
-            cursor = conn.cursor()
-
-            cursor.execute('''INSERT INTO plagiarism_checks
-                (query_content, query_language, translated_content, total_corpus_docs,
-                corpus_matches, max_corpus_similarity, internet_matches,
-                max_internet_similarity, processing_time, results_json, search_method)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (hindi_text, 'hindi', translated_punjabi, corpus_manager.corpus_cache.get('corpus_size', 0),
-                len(corpus_matches),
-                response_data['plagiarism_summary']['highest_corpus_similarity'],
-                len(internet_matches),
-                response_data['plagiarism_summary']['highest_internet_similarity'],
-                processing_time,
-                json.dumps(response_data),
-                'sentence-based' if use_sentence_search else 'keyword-based'))
-
-            conn.commit()
-            conn.close()
-
-        except Exception as e:
-            print(f"⚠️ Database save error: {e}")
-
-        return jsonify(response_data)
+        return jsonify(run_plagiarism_pipeline(hindi_text, use_sentence_search))
 
     except Exception as e:
         print(f"❌ Error: {e}")
