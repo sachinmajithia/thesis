@@ -161,13 +161,20 @@ def load_models():
             print(f"Using device: {device}")
 
             tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+            # Half-precision weights roughly halve the model's RAM footprint
+            # on top of low_cpu_mem_usage. bfloat16 has much broader CPU
+            # kernel support than float16 (which often hits "not implemented
+            # for Half" on CPU), so use it there; float16 is fine on CUDA.
+            half_dtype = torch.bfloat16 if device == "cpu" else torch.float16
             try:
                 # low_cpu_mem_usage avoids holding a duplicate full-precision
                 # copy of the weights in RAM while loading, roughly halving
                 # peak memory use during this step (requires 'accelerate').
-                model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True, low_cpu_mem_usage=True)
+                model = AutoModelForSeq2SeqLM.from_pretrained(
+                    model_name, trust_remote_code=True, low_cpu_mem_usage=True, torch_dtype=half_dtype
+                )
             except ImportError:
-                model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True)
+                model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=half_dtype)
             model = model.to(device)
             model.eval()
 
