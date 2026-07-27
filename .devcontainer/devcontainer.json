@@ -1,0 +1,33 @@
+{
+  "name": "Hindi-Punjabi Translation + Plagiarism Detection",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+
+  // IndicTrans2 needs a few GB of RAM to load (see enhanced_improved.py's
+  // startup memory check) - request a machine with enough headroom so
+  // Codespaces defaults to (or only offers) a size that can actually run it,
+  // instead of the 2-core/4GB "Basic" size that isn't enough.
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "16gb"
+  },
+
+  "postCreateCommand": "pip install --upgrade pip && pip install -r requirements.txt",
+
+  "forwardPorts": [5000],
+  "portsAttributes": {
+    "5000": {
+      "label": "Flask app",
+      "onAutoForward": "notify"
+    }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"]
+    }
+  }
+
+  // Set HF_TOKEN as a Codespaces secret (repo/user Settings > Codespaces >
+  // Secrets) rather than here - it becomes available as an environment
+  // variable automatically, without ever being committed to the repo.
+}
