@@ -641,24 +641,52 @@ class EnhancedCorpusManager:
 # 5. INTERNET SEARCH (ORIGINAL GOOGLE SEARCH TECHNIQUE)
 # ============================================================================
 
-def search_internet_google(query: str, max_results: int = 30) -> List[Dict]:
+# Google's search API loses relevance well before its hard length limit -
+# sending an entire translated paragraph as the query returns few or no
+# hits. Truncating to roughly one sentence keeps the query realistic
+# (the same length a person would type into Google) while the *scoring*
+# below still compares candidates against the full translated text.
+MAX_SEARCH_QUERY_CHARS = 300
+
+def _compute_semantic_similarity(text_a: str, text_b: str) -> Optional[float]:
+    """
+    Real cosine similarity between two texts using the loaded cross-language
+    semantic model (fine-tuned IndicBERT, or pretrained IndicSBERT fallback).
+    Returns None if the model isn't available or either text is empty, so
+    callers can fall back to a heuristic instead of a wrong number.
+    """
+    semantic_model = model_cache.get('semantic_model')
+    if not semantic_model or not text_a or not text_b:
+        return None
+    try:
+        embeddings = semantic_model.encode([text_a, text_b], normalize_embeddings=True)
+        return float(np.dot(embeddings[0], embeddings[1]))
+    except Exception as e:
+        print(f"⚠️ Semantic similarity computation failed: {e}")
+        return None
+
+def search_internet_google(query: str, max_results: int = 30, compare_text: str = None) -> List[Dict]:
     """
     Search Google for similar content, the same way a plain Google search
-    does: the whole query text is sent to Google as a single search, with
-    no sentence-splitting or keyword extraction beforehand.
+    does: the query text is sent to Google as a single search, with no
+    sentence-splitting or keyword extraction beforehand.
 
     Args:
-        query: Input text to search (usually translated Punjabi)
+        query: Text to send as the actual Google search query
         max_results: Maximum number of results
+        compare_text: Text each result's similarity should be measured
+            against (usually the translated Punjabi text). Defaults to
+            `query` when not given, e.g. when searching with the Punjabi
+            text itself.
 
     Returns:
-        List of search results with similarity scores
+        List of search results with real semantic similarity scores
     """
     try:
         print(f"\n🌐 Searching Google for similar content...")
         print(f"📌 Query: '{query[:80]}...'" if len(query) > 80 else f"📌 Query: '{query}'")
 
-        matches = _perform_google_search(query, max_results)
+        matches = _perform_google_search(query, max_results, compare_text=compare_text or query)
 
         seen_urls = set()
         unique_matches = []
@@ -686,10 +714,13 @@ def search_internet_bilingual(
 ) -> List[Dict]:
     """
     Search the internet using BOTH:
-      - original Hindi text
+      - original Hindi text (often indexed with natural, non-machine-
+        translated phrasing, so it surfaces pages a Punjabi MT query misses)
       - translated Punjabi text
 
-    Results are merged and deduplicated by URL.
+    Every candidate found either way is scored against the translated
+    Punjabi text, since that's the actual content being checked for
+    cross-language plagiarism. Results are merged and deduplicated by URL.
     """
     all_matches: List[Dict] = []
     seen_urls = set()
@@ -697,7 +728,7 @@ def search_internet_bilingual(
     # 1) Search with original Hindi text
     if hindi_text and hindi_text.strip():
         print("\n🌐 INTERNET SEARCH: ORIGINAL HINDI TEXT")
-        hindi_matches = search_internet_google(hindi_text, max_results=max_results)
+        hindi_matches = search_internet_google(hindi_text, max_results=max_results, compare_text=translated_punjabi)
         for m in hindi_matches:
             url = m.get("url")
             if not url or url in seen_urls:
@@ -710,7 +741,7 @@ def search_internet_bilingual(
     # 2) Search with translated Punjabi text
     if translated_punjabi and translated_punjabi.strip():
         print("\n🌐 INTERNET SEARCH: TRANSLATED PUNJABI TEXT")
-        punjabi_matches = search_internet_google(translated_punjabi, max_results=max_results)
+        punjabi_matches = search_internet_google(translated_punjabi, max_results=max_results, compare_text=translated_punjabi)
         for m in punjabi_matches:
             url = m.get("url")
             if not url or url in seen_urls:
@@ -725,25 +756,35 @@ def search_internet_bilingual(
     print(f"\n✅ Bilingual internet search complete: {len(all_matches)} unique results")
     return all_matches[:max_results]
 
-def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
+def _perform_google_search(query: str, max_results: int = 10, compare_text: str = None) -> List[Dict]:
     """
     Perform actual Google search for a single query
-    
+
     Args:
         query: Search query
         max_results: Maximum results to return
-    
+        compare_text: Text to score each result's actual similarity
+            against (falls back to `query` itself if not given)
+
     Returns:
-        List of search results
+        List of search results with real semantic similarity scores
     """
     matches = []
+    compare_text = compare_text or query
+
+    # A whole translated paragraph as the query returns few/no hits from a
+    # search engine - truncate to roughly one sentence, like a real Google
+    # search box query, while still scoring results against the full text.
+    search_query = query if len(query) <= MAX_SEARCH_QUERY_CHARS else query[:MAX_SEARCH_QUERY_CHARS]
+    if search_query != query:
+        print(f"✂️ Query truncated for search: {len(query)} -> {len(search_query)} characters")
 
     try:
         # ===== CRITICAL FIX: NO HARDCODED DEFAULTS =====
         google_api_key = 'AIzaSyANu0jIdfaMusSjAcvvY9snLYYydqjiIAs'
         search_engine_id = '121f08de7b22144b1'
         serpapi_key = os.getenv('SERPAPI_KEY')
-        
+
         print(f"\n🔍 API Key Check:")
         print(f"   Google API Key:        {'✅ SET' if google_api_key else '❌ NOT SET'}")
         print(f"   Search Engine ID:      {'✅ SET' if search_engine_id else '❌ NOT SET'}")
@@ -757,38 +798,43 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
             try:
                 search_url = "https://www.googleapis.com/customsearch/v1"
                 params = {
-                    'q': query,
+                    'q': search_query,
                     'key': google_api_key,
                     'cx': search_engine_id,
                     'num': min(max_results, 10)
                 }
-                
+
                 print(f"   Sending request...")
-                print(f"   Input Query: '{query}'")
-                print(f"   Query Length: {len(query)} characters")
+                print(f"   Input Query: '{search_query}'")
+                print(f"   Query Length: {len(search_query)} characters")
 
                 response = requests.get(search_url, params=params, timeout=150)
-                
+
                 print(f"   Response Status: {response.status_code}")
-                
+
                 if response.status_code == 200:
                     data = response.json()
                     results = data.get('items', [])
-                    
+
                     print(f"   ✅ SUCCESS: Got {len(results)} results from Google API")
 
-                    
+
                     for idx, item in enumerate(results):
+                        title = item.get('title', 'No title')
+                        snippet = item.get('snippet', 'No preview available')
+                        real_similarity = _compute_semantic_similarity(compare_text, f"{title} {snippet}")
                         match = {
                             'source': 'internet',
                             'url': item.get('link', ''),
-                            'title': item.get('title', 'No title'),
-                            'similarity': max(0.8, 0.95 - (idx * 0.08)),
-                            'snippet': item.get('snippet', 'No preview available'),
+                            'title': title,
+                            # Real cross-language similarity when the semantic model is
+                            # available; otherwise fall back to a rank-based estimate.
+                            'similarity': real_similarity if real_similarity is not None else max(0.8, 0.95 - (idx * 0.08)),
+                            'snippet': snippet,
                             'search_method': 'google_api'
                         }
                         matches.append(match)
-                    
+
                     print(f"✅ Returning {len(matches)} Google API results")
 
                     return matches
@@ -843,33 +889,36 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
             try:
                 search_url = "https://serpapi.com/search"
                 params = {
-                    'q': query,
+                    'q': search_query,
                     'api_key': serpapi_key,
                     'num': min(max_results, 10)
                 }
-                
+
                 print(f"   Sending request...")
                 response = requests.get(search_url, params=params, timeout=15)
-                
+
                 print(f"   Response Status: {response.status_code}")
-                
+
                 if response.status_code == 200:
                     data = response.json()
                     results = data.get('organic_results', [])
-                    
+
                     print(f"   ✅ SUCCESS: Got {len(results)} results from SerpAPI")
-                    
+
                     for idx, item in enumerate(results):
+                        title = item.get('title', 'No title')
+                        snippet = item.get('snippet', 'No preview available')
+                        real_similarity = _compute_semantic_similarity(compare_text, f"{title} {snippet}")
                         match = {
                             'source': 'internet',
                             'url': item.get('link', ''),
-                            'title': item.get('title', 'No title'),
-                            'similarity': max(0.5, 0.85 - (idx * 0.08)),
-                            'snippet': item.get('snippet', 'No preview available'),
+                            'title': title,
+                            'similarity': real_similarity if real_similarity is not None else max(0.5, 0.85 - (idx * 0.08)),
+                            'snippet': snippet,
                             'search_method': 'serpapi'
                         }
                         matches.append(match)
-                    
+
                     print(f"✅ Returning {len(matches)} SerpAPI results")
                     return matches
                 
@@ -1092,10 +1141,16 @@ def plagiarism_check_text():
         corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
         
         # =========== STEP 3: INTERNET SEARCH (ORIGINAL GOOGLE SEARCH TECHNIQUE) ===========
-        print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - DIRECT SEARCH ON TRANSLATED CONTENT")
+        # Search with BOTH the original Hindi text and the translated Punjabi
+        # text - a Punjabi-only query depends entirely on translation quality
+        # and can miss the real source, since machine-translated wording
+        # often doesn't match how the actual Punjabi page phrases it. Every
+        # candidate found either way is then scored for real similarity
+        # against the translated Punjabi text (see search_internet_bilingual).
+        print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - BILINGUAL (HINDI + PUNJABI)")
         print("-" * 80)
 
-        internet_matches = search_internet_google(translated_punjabi, max_results=30)
+        internet_matches = search_internet_bilingual(hindi_text, translated_punjabi, max_results=30)
 
          #=========== PREPARE RESPONSE ===========
         processing_time = (datetime.now() - start_time).total_seconds()    
