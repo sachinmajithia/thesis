@@ -1,5 +1,5 @@
 # Integrated Hindi-Punjabi Translation + Cross-Language Plagiarism Detection System
-# ENHANCED VERSION with Document Upload & Sentence-Based Search
+# ENHANCED VERSION with Document Upload & Direct Google Search
 
 import pandas as pd
 import io
@@ -17,8 +17,6 @@ from typing import List, Dict, Tuple, Optional
 from werkzeug.utils import secure_filename
 import traceback
 import requests
-import nltk
-from nltk.tokenize import sent_tokenize, word_tokenize
 
 warnings.filterwarnings('ignore')
 
@@ -32,18 +30,12 @@ try:
     from sklearn.metrics.pairwise import cosine_similarity
 except ImportError as e:
     print(f"ERROR: Missing dependency - {e}")
-    print("Please run: pip install flask transformers torch sacrebleu pandas sentencepiece protobuf sentence-transformers scikit-learn requests nltk")
+    print("Please run: pip install flask transformers torch sacrebleu pandas sentencepiece protobuf sentence-transformers scikit-learn requests")
     exit(1)
-
-# Download NLTK data for phrase extraction
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt')
 
 print("="*80)
 print("INTEGRATED: Hindi-Punjabi Translation + Cross-Language Plagiarism Detection")
-print("ENHANCED: Document Upload + Sentence-Based Search after Translation")
+print("ENHANCED: Document Upload + Direct Google Search after Translation")
 print("="*80)
 
 # ============================================================================
@@ -133,113 +125,7 @@ def extract_text_from_file(filepath):
         return None
 
 # ============================================================================
-# 1. SENTENCE-BASED SEARCH EXTRACTOR
-# ============================================================================
-
-class SentenceBasedSearcher:
-    """Extract and create sentence-based search queries"""
-    
-    def __init__(self):
-        self.min_sentence_length = 3  # Minimum words in a sentence
-        
-    def extract_sentences(self, text: str, top_n: int = 10) -> List[str]:
-        """
-        Extract important sentences from text
-        
-        Args:
-            text: Input text
-            top_n: Number of top sentences to extract
-            
-        Returns:
-            List of extracted sentences
-        """
-        if not text:
-            return []
-        
-        try:
-            # Tokenize into sentences
-            sentences = sent_tokenize(text)
-            
-            # Filter sentences by minimum word count
-            valid_sentences = [
-                s.strip() 
-                for s in sentences 
-                if len(s.split()) >= self.min_sentence_length and len(s.strip()) > 5
-            ]
-            
-            print(f"🔤 Extracted {len(valid_sentences)} sentences from text")
-            
-            # Return top N sentences
-            return valid_sentences[:top_n]
-        except Exception as e:
-            print(f"⚠️ Sentence extraction error: {e}")
-            return []
-    
-    def create_sentence_queries(self, text: str, num_queries: int = 5) -> List[str]:
-        """
-        Create search queries based on sentences instead of keywords
-        
-        Args:
-            text: Input text (usually Punjabi translated text)
-            num_queries: Number of sentence queries to generate
-            
-        Returns:
-            List of sentence-based search queries
-        """
-        sentences = self.extract_sentences(text, top_n=num_queries * 2)
-        
-        search_queries = []
-        for sentence in sentences[:num_queries]:
-            # Clean sentence for search
-            #clean_sentence = re.sub(r'[^\w\s]', '', sentence).strip()
-            clean_sentence = sentence.strip()
-            clean_sentence = re.sub(r'[.,!?;:\'"]+$', '', clean_sentence).strip()
-            if len(clean_sentence) > 10:  # Only sentences with meaningful length
-                search_queries.append(clean_sentence)
-        
-        print(f"📋 Created {len(search_queries)} sentence-based search queries:")
-        for i, q in enumerate(search_queries, 1):
-            print(f"   {i}. {q[:80]}..." if len(q) > 80 else f"   {i}. {q}")
-        
-        return search_queries if search_queries else [text[:150]]
-    
-    def create_hybrid_queries(self, text: str, num_queries: int = 5) -> List[Dict]:
-        """
-        Create hybrid search queries (sentences + multi-word phrases)
-        
-        Args:
-            text: Input text
-            num_queries: Number of queries
-            
-        Returns:
-            List of query dictionaries with type and content
-        """
-        sentences = self.extract_sentences(text, top_n=num_queries)
-        
-        hybrid_queries = []
-        for i, sentence in enumerate(sentences):
-            # Extract important phrases from sentence
-            words = sentence.split()
-            
-            # Take 2-4 consecutive words as phrases
-            phrases = []
-            for j in range(len(words) - 1):
-                phrase = ' '.join(words[j:min(j+4, len(words))])
-                if len(phrase) > 10:
-                    phrases.append(phrase)
-            
-            query_obj = {
-                'type': 'sentence',
-                'query': sentence.strip(),
-                'phrases': phrases[:3] if phrases else [],
-                'priority': 'high' if i < 3 else 'medium'
-            }
-            hybrid_queries.append(query_obj)
-        
-        return hybrid_queries
-
-# ============================================================================
-# 2. MODEL LOADING & INITIALIZATION
+# 1. MODEL LOADING & INITIALIZATION
 # ============================================================================
 
 def load_models():
@@ -327,11 +213,7 @@ def load_models():
         )
         model_cache['tfidf_vectorizer'] = tfidf_vectorizer
         print("✅ TF-IDF vectorizer loaded!")
-        
-        # Initialize Sentence-Based Searcher
-        model_cache['sentence_searcher'] = SentenceBasedSearcher()
-        print("✅ Sentence-based searcher initialized!")
-        
+
         model_cache['loaded'] = True
         print("\n✅ All models loaded successfully!")
         return True
@@ -551,7 +433,6 @@ class EnhancedCorpusManager:
         self.ws_re = re.compile(r'\s+')
         self.models_available = model_cache.get('loaded', False)
         self.corpus_cache = corpus_cache
-        self.sentence_searcher = model_cache.get('sentence_searcher')
     
     def normalize_text(self, text: str) -> str:
         """Enhanced text normalization for Indic scripts"""
@@ -757,52 +638,42 @@ class EnhancedCorpusManager:
             return []
 
 # ============================================================================
-# 5. ENHANCED INTERNET SEARCH WITH SENTENCE-BASED APPROACH
+# 5. INTERNET SEARCH (ORIGINAL GOOGLE SEARCH TECHNIQUE)
 # ============================================================================
 
-def search_internet_google(query: str, max_results: int = 30, use_sentence_search: bool = True) -> List[Dict]:
+def search_internet_google(query: str, max_results: int = 30) -> List[Dict]:
     """
-    Search Google for similar content using sentence-based approach
-    
+    Search Google for similar content, the same way a plain Google search
+    does: the whole query text is sent to Google as a single search, with
+    no sentence-splitting or keyword extraction beforehand.
+
     Args:
         query: Input text to search (usually translated Punjabi)
         max_results: Maximum number of results
-        use_sentence_search: If True, use sentence-based search instead of keyword-level
-        
+
     Returns:
         List of search results with similarity scores
     """
     try:
         print(f"\n🌐 Searching Google for similar content...")
-        print(f"📝 Search strategy: {'SENTENCE-BASED' if use_sentence_search else 'KEYWORD-BASED'}")
-        
-        # Extract sentences if enabled
-        search_queries = [query]  # Default: use whole query
-        
-        if use_sentence_search and model_cache.get('sentence_searcher'):
-            sentence_searcher = model_cache['sentence_searcher']
-            search_queries = sentence_searcher.create_sentence_queries(query, num_queries=5)
-        
-        all_matches = []
+        print(f"📌 Query: '{query[:80]}...'" if len(query) > 80 else f"📌 Query: '{query}'")
+
+        matches = _perform_google_search(query, max_results)
+
         seen_urls = set()
-        
-        # Perform searches for each sentence
-        for i, search_query in enumerate(search_queries, 1):
-            print(f"\n📌 Searching with Query {i}/{len(search_queries)}: '{search_query[:80]}...'")
-            matches = _perform_google_search(search_query, max_results // len(search_queries) + 2)
-            
-            for match in matches:
-                url = match['url']
-                if url not in seen_urls:  # Avoid duplicates
-                    seen_urls.add(url)
-                    all_matches.append(match)
-        
+        unique_matches = []
+        for match in matches:
+            url = match['url']
+            if url not in seen_urls:  # Avoid duplicates
+                seen_urls.add(url)
+                unique_matches.append(match)
+
         # Sort by similarity and return top results
-        all_matches.sort(key=lambda x: x['similarity'], reverse=True)
-        
-        print(f"\n✅ Internet search completed: {len(all_matches)} unique results found")
-        return all_matches[:max_results]
-        
+        unique_matches.sort(key=lambda x: x['similarity'], reverse=True)
+
+        print(f"\n✅ Internet search completed: {len(unique_matches)} unique results found")
+        return unique_matches[:max_results]
+
     except Exception as e:
         print(f"❌ Internet search error: {e}")
         traceback.print_exc()
@@ -811,8 +682,7 @@ def search_internet_google(query: str, max_results: int = 30, use_sentence_searc
 def search_internet_bilingual(
     hindi_text: str,
     translated_punjabi: str,
-    max_results: int = 30,
-    use_sentence_search: bool = True
+    max_results: int = 30
 ) -> List[Dict]:
     """
     Search the internet using BOTH:
@@ -827,11 +697,7 @@ def search_internet_bilingual(
     # 1) Search with original Hindi text
     if hindi_text and hindi_text.strip():
         print("\n🌐 INTERNET SEARCH: ORIGINAL HINDI TEXT")
-        hindi_matches = search_internet_google(
-            hindi_text,
-            max_results=max_results,
-            use_sentence_search=use_sentence_search
-        )
+        hindi_matches = search_internet_google(hindi_text, max_results=max_results)
         for m in hindi_matches:
             url = m.get("url")
             if not url or url in seen_urls:
@@ -844,11 +710,7 @@ def search_internet_bilingual(
     # 2) Search with translated Punjabi text
     if translated_punjabi and translated_punjabi.strip():
         print("\n🌐 INTERNET SEARCH: TRANSLATED PUNJABI TEXT")
-        punjabi_matches = search_internet_google(
-            translated_punjabi,
-            max_results=max_results,
-            use_sentence_search=use_sentence_search
-        )
+        punjabi_matches = search_internet_google(translated_punjabi, max_results=max_results)
         for m in punjabi_matches:
             url = m.get("url")
             if not url or url in seen_urls:
@@ -1200,15 +1062,14 @@ def upload_document_corpus():
 def plagiarism_check_text():
     """
     Check plagiarism for text input
-    
+
     Accepts: Hindi text
-    Process: Translate → Corpus check → Internet search (SENTENCE-BASED)
+    Process: Translate → Corpus check → Internet search (direct Google search)
     """
     try:
         data = request.get_json()
         hindi_text = data.get('hindi_text', '').strip()
-        use_sentence_search = data.get('use_sentence_search', True)
-        
+
         if not hindi_text:
             return jsonify({'error': 'No Hindi text provided'}), 400
         
@@ -1230,19 +1091,13 @@ def plagiarism_check_text():
         
         corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
         
-        # =========== STEP 3: INTERNET SEARCH (GOOGLE) WITH SENTENCE-BASED APPROACH ===========
-        print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED FOR TRANSLATED CONTENT")
+        # =========== STEP 3: INTERNET SEARCH (ORIGINAL GOOGLE SEARCH TECHNIQUE) ===========
+        print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - DIRECT SEARCH ON TRANSLATED CONTENT")
         print("-" * 80)
-        
-        internet_matches = search_internet_google(translated_punjabi, max_results=30, use_sentence_search=use_sentence_search)
 
-        #internet_matches = search_internet_google(hindi_text, max_results=30, use_sentence_search=use_sentence_search)
+        internet_matches = search_internet_google(translated_punjabi, max_results=30)
 
-        #internet_matches = search_internet_bilingual(hindi_text=hindi_text,translated_punjabi=translated_punjabi,max_results=30,use_sentence_search=use_sentence_search)
-
-        #print("dddd" . internet_matches)
-
-         #=========== PREPARE RESPONSE ===========    
+         #=========== PREPARE RESPONSE ===========
         processing_time = (datetime.now() - start_time).total_seconds()    
         response_data = {
             'success': True,
@@ -1262,7 +1117,7 @@ def plagiarism_check_text():
                 'total_matches': len(internet_matches),
                 'matches': internet_matches[:40],
                 'max_similarity': max([m['similarity'] for m in internet_matches], default=0),
-                'search_method': 'sentence-based' if use_sentence_search else 'keyword-based'
+                'search_method': 'google-search'
             },
             
             # Summary
@@ -1304,7 +1159,7 @@ def plagiarism_check_text():
                 response_data['plagiarism_summary']['highest_internet_similarity'],
                 processing_time,
                 json.dumps(response_data),
-                'sentence-based' if use_sentence_search else 'keyword-based'))
+                'google-search'))
             
             conn.commit()
             conn.close()
@@ -1464,7 +1319,7 @@ if __name__ == '__main__':
     print("\n🔍 FEATURES:")
     print(" ✅ Document file upload for plagiarism checking (TXT, PDF, DOCX)")
     print(" ✅ Corpus management with document upload")
-    print(" ✅ SENTENCE-BASED Google search (after translation to Punjabi)")
+    print(" ✅ Direct Google search (after translation to Punjabi)")
     print(" ✅ Hindi-Punjabi translation (Dictionary → EBMT → NMT)")
     print(" ✅ Cross-language plagiarism detection")
     
