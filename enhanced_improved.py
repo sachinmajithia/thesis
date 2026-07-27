@@ -140,23 +140,43 @@ def load_models():
         print("\n[STEP 1/3] Loading Models...")
         print("=" * 80)
         
-        # Load Translation Model (IndicTrans2, indic-to-indic direction)
-        print("\n📖 Loading IndicTrans2 Translation Model...")
-        model_name = "ai4bharat/indictrans2-indic-indic-dist-320M"
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {device}")
+        # Load Translation Model (IndicTrans2, indic-to-indic direction).
+        # Downloading + loading it needs several GB of RAM; on a memory-
+        # constrained machine the OS OOM-killer can terminate the process
+        # right here with no Python traceback at all (SIGKILL bypasses
+        # try/except), which is exactly a silent-exit symptom. Set
+        # SKIP_NMT_MODEL=1 to bypass this entirely and run in
+        # Dictionary+EBMT-only mode.
+        if os.getenv('SKIP_NMT_MODEL', '').lower() in ('1', 'true', 'yes'):
+            print("\n📖 SKIP_NMT_MODEL is set - skipping IndicTrans2 load. "
+                  "NMT translation will be unavailable; Dictionary and EBMT still work.")
+            model_cache['tokenizer'] = None
+            model_cache['model'] = None
+            model_cache['device'] = "cuda" if torch.cuda.is_available() else "cpu"
+            model_cache['indic_processor'] = None
+        else:
+            print("\n📖 Loading IndicTrans2 Translation Model...")
+            model_name = "ai4bharat/indictrans2-indic-indic-dist-320M"
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"Using device: {device}")
 
-        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True)
-        model = model.to(device)
-        model.eval()
+            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+            try:
+                # low_cpu_mem_usage avoids holding a duplicate full-precision
+                # copy of the weights in RAM while loading, roughly halving
+                # peak memory use during this step (requires 'accelerate').
+                model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True, low_cpu_mem_usage=True)
+            except ImportError:
+                model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True)
+            model = model.to(device)
+            model.eval()
 
-        model_cache['tokenizer'] = tokenizer
-        model_cache['model'] = model
-        model_cache['device'] = device
-        model_cache['indic_processor'] = IndicProcessor(inference=True)
+            model_cache['tokenizer'] = tokenizer
+            model_cache['model'] = model
+            model_cache['device'] = device
+            model_cache['indic_processor'] = IndicProcessor(inference=True)
 
-        print("✅ IndicTrans2 model loaded successfully!")
+            print("✅ IndicTrans2 model loaded successfully!")
         
         # Load Semantic Model for Cross-Language Detection.
         # Prefer our own IndicBERT fine-tuned on the Hindi-Punjabi parallel
