@@ -129,6 +129,62 @@ def extract_text_from_file(filepath):
 # 1. MODEL LOADING & INITIALIZATION
 # ============================================================================
 
+def _get_effective_memory_limit_bytes() -> Optional[int]:
+    """
+    Best-effort detection of how much memory this process can actually use:
+    the cgroup limit (containers) if one is set, otherwise the host's
+    available RAM from /proc/meminfo. Returns None if neither is readable
+    (e.g. non-Linux), in which case memory capping is skipped entirely.
+    """
+    limits = []
+    for cgroup_path in ('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes'):
+        try:
+            with open(cgroup_path) as f:
+                value = f.read().strip()
+            if value.isdigit():
+                limits.append(int(value))
+        except (FileNotFoundError, PermissionError):
+            continue
+    try:
+        with open('/proc/meminfo') as f:
+            meminfo = f.read()
+        match = re.search(r'MemAvailable:\s+(\d+)', meminfo)
+        if match:
+            limits.append(int(match.group(1)) * 1024)
+    except FileNotFoundError:
+        pass
+    return min(limits) if limits else None
+
+def _cap_memory_to_avoid_oom_kill(safety_margin_mb: int = 300) -> None:
+    """
+    Cap this process's address space (RLIMIT_AS) comfortably below whatever
+    memory it can actually use. Without this, a model load that needs more
+    memory than is really available gets silently SIGKILLed by the kernel's
+    (or the container's cgroup) OOM-killer - a signal that bypasses
+    try/except entirely, which is exactly the "process exits with zero
+    Python traceback" symptom this prevents. With the cap in place, the
+    same over-budget load instead fails with a normal, catchable
+    MemoryError/OSError that the caller can handle gracefully.
+
+    No-op if the limit can't be determined, or on platforms without
+    RLIMIT_AS (e.g. Windows).
+    """
+    try:
+        import resource
+        available_bytes = _get_effective_memory_limit_bytes()
+        if not available_bytes:
+            return
+        target_limit = max(available_bytes - safety_margin_mb * 1024 * 1024, 256 * 1024 * 1024)
+        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+        if hard != resource.RLIM_INFINITY:
+            target_limit = min(target_limit, hard)
+        resource.setrlimit(resource.RLIMIT_AS, (target_limit, hard))
+        print(f"🛡️ Capped process memory to {target_limit / (1024 ** 2):.0f}MB "
+              f"(detected available: {available_bytes / (1024 ** 2):.0f}MB) so an "
+              f"over-budget model load fails safely instead of getting OOM-killed.")
+    except Exception as e:
+        print(f"⚠️ Could not set a memory safety limit: {e}")
+
 def load_models():
     """Load all required models for translation and plagiarism detection"""
     global model_cache
@@ -139,52 +195,68 @@ def load_models():
     try:
         print("\n[STEP 1/3] Loading Models...")
         print("=" * 80)
-        
+
+        # Cap this process's memory before any heavy model load, so that an
+        # over-budget load fails with a catchable exception (handled just
+        # below) instead of the kernel/cgroup OOM-killer silently SIGKILLing
+        # the whole app with no Python traceback at all.
+        _cap_memory_to_avoid_oom_kill()
+
         # Load Translation Model (IndicTrans2, indic-to-indic direction).
-        # Downloading + loading it needs several GB of RAM; on a memory-
-        # constrained machine the OS OOM-killer can terminate the process
-        # right here with no Python traceback at all (SIGKILL bypasses
-        # try/except), which is exactly a silent-exit symptom. Set
-        # SKIP_NMT_MODEL=1 to bypass this entirely and run in
-        # Dictionary+EBMT-only mode.
-        if os.getenv('SKIP_NMT_MODEL', '').lower() in ('1', 'true', 'yes'):
+        # Set SKIP_NMT_MODEL=1 to bypass this entirely and run in
+        # Dictionary+EBMT-only mode without even attempting the load.
+        skip_nmt_requested = os.getenv('SKIP_NMT_MODEL', '').lower() in ('1', 'true', 'yes')
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        if skip_nmt_requested:
             print("\n📖 SKIP_NMT_MODEL is set - skipping IndicTrans2 load. "
                   "NMT translation will be unavailable; Dictionary and EBMT still work.")
             model_cache['tokenizer'] = None
             model_cache['model'] = None
-            model_cache['device'] = "cuda" if torch.cuda.is_available() else "cpu"
+            model_cache['device'] = device
             model_cache['indic_processor'] = None
         else:
             print("\n📖 Loading IndicTrans2 Translation Model...")
             model_name = "ai4bharat/indictrans2-indic-indic-dist-320M"
-            device = "cuda" if torch.cuda.is_available() else "cpu"
             print(f"Using device: {device}")
 
-            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-            # Half-precision weights roughly halve the model's RAM footprint
-            # on top of low_cpu_mem_usage. bfloat16 has much broader CPU
-            # kernel support than float16 (which often hits "not implemented
-            # for Half" on CPU), so use it there; float16 is fine on CUDA.
-            half_dtype = torch.bfloat16 if device == "cpu" else torch.float16
             try:
-                # low_cpu_mem_usage avoids holding a duplicate full-precision
-                # copy of the weights in RAM while loading, roughly halving
-                # peak memory use during this step (requires 'accelerate').
-                model = AutoModelForSeq2SeqLM.from_pretrained(
-                    model_name, trust_remote_code=True, low_cpu_mem_usage=True, torch_dtype=half_dtype
-                )
-            except ImportError:
-                model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=half_dtype)
-            model = model.to(device)
-            model.eval()
+                tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+                # Half-precision weights roughly halve the model's RAM footprint
+                # on top of low_cpu_mem_usage. bfloat16 has much broader CPU
+                # kernel support than float16 (which often hits "not implemented
+                # for Half" on CPU), so use it there; float16 is fine on CUDA.
+                half_dtype = torch.bfloat16 if device == "cpu" else torch.float16
+                try:
+                    # low_cpu_mem_usage avoids holding a duplicate full-precision
+                    # copy of the weights in RAM while loading, roughly halving
+                    # peak memory use during this step (requires 'accelerate').
+                    model = AutoModelForSeq2SeqLM.from_pretrained(
+                        model_name, trust_remote_code=True, low_cpu_mem_usage=True, torch_dtype=half_dtype
+                    )
+                except ImportError:
+                    model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=half_dtype)
+                model = model.to(device)
+                model.eval()
 
-            model_cache['tokenizer'] = tokenizer
-            model_cache['model'] = model
-            model_cache['device'] = device
-            model_cache['indic_processor'] = IndicProcessor(inference=True)
+                model_cache['tokenizer'] = tokenizer
+                model_cache['model'] = model
+                model_cache['device'] = device
+                model_cache['indic_processor'] = IndicProcessor(inference=True)
 
-            print("✅ IndicTrans2 model loaded successfully!")
-        
+                print("✅ IndicTrans2 model loaded successfully!")
+            except (MemoryError, OSError, RuntimeError) as e:
+                # Thanks to _cap_memory_to_avoid_oom_kill(), an over-budget
+                # load lands here instead of taking the whole process down.
+                print(f"⚠️ IndicTrans2 failed to load ({type(e).__name__}: {e}). "
+                      f"This almost always means the machine doesn't have enough "
+                      f"RAM for this model. Falling back to Dictionary+EBMT-only "
+                      f"mode - NMT translation will be unavailable.")
+                model_cache['tokenizer'] = None
+                model_cache['model'] = None
+                model_cache['device'] = device
+                model_cache['indic_processor'] = None
+
         # Load Semantic Model for Cross-Language Detection.
         # Prefer our own IndicBERT fine-tuned on the Hindi-Punjabi parallel
         # corpus (see train_indicbert.py) and fall back to the generic
