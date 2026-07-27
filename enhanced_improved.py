@@ -713,10 +713,11 @@ def search_internet_bilingual(
     max_results: int = 30
 ) -> List[Dict]:
     """
-    Search the internet using BOTH:
-      - original Hindi text (often indexed with natural, non-machine-
-        translated phrasing, so it surfaces pages a Punjabi MT query misses)
-      - translated Punjabi text
+    Search the internet with the translated Punjabi text as the primary
+    query - matching corpus_manager.search_corpus, which only ever searches
+    the Punjabi translation - then supplement with the original Hindi text
+    (often indexed with natural, non-machine-translated phrasing, so it
+    surfaces pages a Punjabi MT query misses) to fill any remaining slots.
 
     Every candidate found either way is scored against the translated
     Punjabi text, since that's the actual content being checked for
@@ -725,22 +726,9 @@ def search_internet_bilingual(
     all_matches: List[Dict] = []
     seen_urls = set()
 
-    # 1) Search with original Hindi text
-    if hindi_text and hindi_text.strip():
-        print("\n🌐 INTERNET SEARCH: ORIGINAL HINDI TEXT")
-        hindi_matches = search_internet_google(hindi_text, max_results=max_results, compare_text=translated_punjabi)
-        for m in hindi_matches:
-            url = m.get("url")
-            if not url or url in seen_urls:
-                continue
-            seen_urls.add(url)
-            m = dict(m)
-            m["query_language"] = "hindi"
-            all_matches.append(m)
-
-    # 2) Search with translated Punjabi text
+    # 1) PRIMARY: search with translated Punjabi text, same as corpus search
     if translated_punjabi and translated_punjabi.strip():
-        print("\n🌐 INTERNET SEARCH: TRANSLATED PUNJABI TEXT")
+        print("\n🌐 INTERNET SEARCH (PRIMARY): TRANSLATED PUNJABI TEXT")
         punjabi_matches = search_internet_google(translated_punjabi, max_results=max_results, compare_text=translated_punjabi)
         for m in punjabi_matches:
             url = m.get("url")
@@ -749,6 +737,20 @@ def search_internet_bilingual(
             seen_urls.add(url)
             m = dict(m)
             m["query_language"] = "punjabi"
+            all_matches.append(m)
+
+    # 2) SUPPLEMENT: search with original Hindi text to fill remaining slots
+    remaining = max_results - len(all_matches)
+    if remaining > 0 and hindi_text and hindi_text.strip():
+        print("\n🌐 INTERNET SEARCH (SUPPLEMENT): ORIGINAL HINDI TEXT")
+        hindi_matches = search_internet_google(hindi_text, max_results=remaining, compare_text=translated_punjabi)
+        for m in hindi_matches:
+            url = m.get("url")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            m = dict(m)
+            m["query_language"] = "hindi"
             all_matches.append(m)
 
     # Sort combined list by similarity and trim
