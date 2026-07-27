@@ -16,3 +16,4 @@ PyPDF2
 python-docx
 datasets
 IndicTransToolkit
+huggingface_hub

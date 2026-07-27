@@ -28,11 +28,25 @@ try:
     from sentence_transformers import SentenceTransformer
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
-    from IndicTransToolkit.processor import IndicProcessor
+    from IndicTransToolkit import IndicProcessor
+    from huggingface_hub import login as hf_login
 except ImportError as e:
     print(f"ERROR: Missing dependency - {e}")
-    print("Please run: pip install flask transformers torch sacrebleu pandas sentencepiece protobuf sentence-transformers scikit-learn requests IndicTransToolkit")
+    print("Please run: pip install flask transformers torch sacrebleu pandas sentencepiece protobuf sentence-transformers scikit-learn requests IndicTransToolkit huggingface_hub")
     exit(1)
+
+# Optional: log in to Hugging Face Hub if a token is provided via env var.
+# NEVER hardcode a real token here - it would be pushed straight into the
+# repo's history. Set HF_TOKEN in the environment instead:
+#   export HF_TOKEN="hf_..."          (macOS/Linux)
+#   setx HF_TOKEN "hf_..."            (Windows)
+_hf_token = os.getenv('HF_TOKEN')
+if _hf_token:
+    try:
+        hf_login(token=_hf_token)
+        print("✅ Logged in to Hugging Face Hub")
+    except Exception as e:
+        print(f"⚠️ Hugging Face Hub login failed: {e}")
 
 print("="*80)
 print("INTEGRATED: Hindi-Punjabi Translation + Cross-Language Plagiarism Detection")
@@ -221,7 +235,7 @@ def load_models():
             print(f"Using device: {device}")
 
             try:
-                tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+                tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, use_fast=False)
                 # Half-precision weights roughly halve the model's RAM footprint
                 # on top of low_cpu_mem_usage. bfloat16 has much broader CPU
                 # kernel support than float16 (which often hits "not implemented
