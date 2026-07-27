@@ -143,12 +143,13 @@ def extract_text_from_file(filepath):
 # 1. MODEL LOADING & INITIALIZATION
 # ============================================================================
 
-def _get_effective_memory_limit_bytes() -> Optional[int]:
+def _get_available_memory_bytes() -> Optional[int]:
     """
-    Best-effort detection of how much memory this process can actually use:
-    the cgroup limit (containers) if one is set, otherwise the host's
-    available RAM from /proc/meminfo. Returns None if neither is readable
-    (e.g. non-Linux), in which case memory capping is skipped entirely.
+    Best-effort, cross-platform detection of how much memory is actually
+    available to this process right now: the cgroup limit (Linux
+    containers) if one is set, else /proc/meminfo's MemAvailable on Linux,
+    else GlobalMemoryStatusEx on Windows. Returns None if none of these
+    are readable (e.g. an unsupported platform).
     """
     limits = []
     for cgroup_path in ('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes'):
@@ -167,25 +168,60 @@ def _get_effective_memory_limit_bytes() -> Optional[int]:
             limits.append(int(match.group(1)) * 1024)
     except FileNotFoundError:
         pass
-    return min(limits) if limits else None
+    if limits:
+        return min(limits)
+
+    # Windows: no /proc, no cgroups, and no RLIMIT_AS - ask the OS directly
+    # via the Win32 API instead.
+    try:
+        import ctypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        stat = MEMORYSTATUSEX()
+        stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            return stat.ullAvailPhys
+    except Exception:
+        pass
+
+    return None
+
+# A 320M-parameter model at half precision needs roughly 650MB just for
+# weights, plus tokenizer, activation buffers and PyTorch/transformers'
+# own baseline overhead. Require a comfortable margin above that before
+# even attempting the load.
+MIN_MEMORY_FOR_INDICTRANS2_MB = 2048
 
 def _cap_memory_to_avoid_oom_kill(safety_margin_mb: int = 300) -> None:
     """
-    Cap this process's address space (RLIMIT_AS) comfortably below whatever
-    memory it can actually use. Without this, a model load that needs more
-    memory than is really available gets silently SIGKILLed by the kernel's
-    (or the container's cgroup) OOM-killer - a signal that bypasses
-    try/except entirely, which is exactly the "process exits with zero
-    Python traceback" symptom this prevents. With the cap in place, the
+    On Linux, cap this process's address space (RLIMIT_AS) comfortably
+    below whatever memory it can actually use. Without this, a model load
+    that needs more memory than is really available gets silently
+    SIGKILLed by the kernel's (or the container's cgroup) OOM-killer - a
+    signal that bypasses try/except entirely. With the cap in place, the
     same over-budget load instead fails with a normal, catchable
-    MemoryError/OSError that the caller can handle gracefully.
+    MemoryError/OSError.
 
-    No-op if the limit can't be determined, or on platforms without
-    RLIMIT_AS (e.g. Windows).
+    This only helps on Linux (RLIMIT_AS doesn't exist on Windows/macOS,
+    where a low-memory crash is often a native access-violation the
+    process can't catch at all) - see MIN_MEMORY_FOR_INDICTRANS2_MB below
+    for the cross-platform check that actually matters everywhere.
     """
     try:
         import resource
-        available_bytes = _get_effective_memory_limit_bytes()
+        available_bytes = _get_available_memory_bytes()
         if not available_bytes:
             return
         target_limit = max(available_bytes - safety_margin_mb * 1024 * 1024, 256 * 1024 * 1024)
@@ -196,6 +232,8 @@ def _cap_memory_to_avoid_oom_kill(safety_margin_mb: int = 300) -> None:
         print(f"🛡️ Capped process memory to {target_limit / (1024 ** 2):.0f}MB "
               f"(detected available: {available_bytes / (1024 ** 2):.0f}MB) so an "
               f"over-budget model load fails safely instead of getting OOM-killed.")
+    except ImportError:
+        pass  # No 'resource' module (e.g. Windows) - nothing to do here.
     except Exception as e:
         print(f"⚠️ Could not set a memory safety limit: {e}")
 
@@ -222,9 +260,29 @@ def load_models():
         skip_nmt_requested = os.getenv('SKIP_NMT_MODEL', '').lower() in ('1', 'true', 'yes')
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+        available_mb = None
+        available_bytes = _get_available_memory_bytes()
+        if available_bytes is not None:
+            available_mb = available_bytes / (1024 ** 2)
+
         if skip_nmt_requested:
             print("\n📖 SKIP_NMT_MODEL is set - skipping IndicTrans2 load. "
                   "NMT translation will be unavailable; Dictionary and EBMT still work.")
+            model_cache['tokenizer'] = None
+            model_cache['model'] = None
+            model_cache['device'] = device
+            model_cache['indic_processor'] = None
+        elif available_mb is not None and available_mb < MIN_MEMORY_FOR_INDICTRANS2_MB:
+            # Check BEFORE attempting the load, not after: on platforms
+            # without RLIMIT_AS (Windows/macOS), an over-budget load can
+            # crash the whole process at the native level with no
+            # catchable Python exception at all - a try/except around the
+            # load can't help there, so refusing to even attempt it is the
+            # only reliable way to keep the app running.
+            print(f"\n⚠️ Only {available_mb:.0f}MB memory available "
+                  f"(need ~{MIN_MEMORY_FOR_INDICTRANS2_MB}MB) - skipping IndicTrans2 load "
+                  f"to avoid crashing. Falling back to Dictionary+EBMT-only mode; "
+                  f"NMT translation will be unavailable.")
             model_cache['tokenizer'] = None
             model_cache['model'] = None
             model_cache['device'] = device
@@ -233,6 +291,8 @@ def load_models():
             print("\n📖 Loading IndicTrans2 Translation Model...")
             model_name = "ai4bharat/indictrans2-indic-indic-dist-320M"
             print(f"Using device: {device}")
+            if available_mb is not None:
+                print(f"Available memory: {available_mb:.0f}MB")
 
             try:
                 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, use_fast=False)
