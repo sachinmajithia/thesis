@@ -17,7 +17,6 @@ from typing import List, Dict, Tuple, Optional
 from werkzeug.utils import secure_filename
 import traceback
 import requests
-from urllib.parse import quote
 import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
 
@@ -1040,60 +1039,10 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
             print(f"   Set with: setx SERPAPI_KEY \"your_key\"  (Windows)")
             print(f"   Set with: export SERPAPI_KEY=\"your_key\"  (macOS/Linux)")
         
-        # ===== METHOD 3: FALLBACK TO SIMULATION =====
-        print(f"\n📝 All real APIs unavailable - using simulated results")
-        print(f"   (This is FAKE data for testing)")
-        
-        simulated_results = [
-            {
-                'url': f'https://example-site-1.com/search?q={quote(query)}&hl=en',
-                'title': f'Search Results for: {query}',
-                'snippet': f'Find information and resources about {query}.',
-                'similarity': 0.82,
-                'search_method': 'simulated'
-            },
-            {
-                'url': f'https://wiki-example.com/{quote(query)}',
-                'title': f'{query} - Reference',
-                'snippet': f'Comprehensive information about {query}.',
-                'similarity': 0.76,
-                'search_method': 'simulated'
-            },
-            {
-                'url': f'https://www.quora.com/search?q={quote(query)}',
-                'title': f'Q&A: {query}',
-                'snippet': f'Questions and answers related to {query}.',
-                'similarity': 0.68,
-                'search_method': 'simulated'
-            },
-            {
-                'url': f'https://blog-example.com/{quote(query)}',
-                'title': f'Blog: {query}',
-                'snippet': f'In-depth analysis about {query}.',
-                'similarity': 0.61,
-                'search_method': 'simulated'
-            },
-            {
-                'url': f'https://news-example.com/topic/{quote(query)}',
-                'title': f'News: {query}',
-                'snippet': f'Latest news about {query}.',
-                'similarity': 0.55,
-                'search_method': 'simulated'
-            }
-        ]
-
-        for result in simulated_results[:max_results]:
-            match = {
-                'source': 'internet',
-                'url': result['url'],
-                'title': result['title'],
-                'similarity': result['similarity'],
-                'snippet': result['snippet'],
-                'search_method': result['search_method']
-            }
-            matches.append(match)
-
-        print(f"✅ Generated {len(matches)} SIMULATED results (not real)")
+        # No real search API returned results - return an empty list instead
+        # of fabricating fake matches, so callers only ever see genuine
+        # Google (or SerpAPI) search results.
+        print(f"\n⚠️ All real search APIs unavailable or returned no results")
         return matches
 
     except Exception as e:
