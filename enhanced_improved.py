@@ -28,9 +28,10 @@ try:
     from sentence_transformers import SentenceTransformer
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
+    from IndicTransToolkit.processor import IndicProcessor
 except ImportError as e:
     print(f"ERROR: Missing dependency - {e}")
-    print("Please run: pip install flask transformers torch sacrebleu pandas sentencepiece protobuf sentence-transformers scikit-learn requests")
+    print("Please run: pip install flask transformers torch sacrebleu pandas sentencepiece protobuf sentence-transformers scikit-learn requests IndicTransToolkit")
     exit(1)
 
 print("="*80)
@@ -139,21 +140,23 @@ def load_models():
         print("\n[STEP 1/3] Loading Models...")
         print("=" * 80)
         
-        # Load Translation Models
-        print("\n📖 Loading NLLB-200 Translation Model...")
-        model_name = "facebook/nllb-200-distilled-600M"
+        # Load Translation Model (IndicTrans2, indic-to-indic direction)
+        print("\n📖 Loading IndicTrans2 Translation Model...")
+        model_name = "ai4bharat/indictrans2-indic-indic-dist-320M"
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Using device: {device}")
-        
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True)
         model = model.to(device)
-        
+        model.eval()
+
         model_cache['tokenizer'] = tokenizer
         model_cache['model'] = model
         model_cache['device'] = device
-        
-        print("✅ NLLB-200 model loaded successfully!")
+        model_cache['indic_processor'] = IndicProcessor(inference=True)
+
+        print("✅ IndicTrans2 model loaded successfully!")
         
         # Load Semantic Model for Cross-Language Detection.
         # Prefer our own IndicBERT fine-tuned on the Hindi-Punjabi parallel
@@ -354,26 +357,36 @@ def ebmt_translate(hindi_sentence_to_translate, parallel_corpus, similarity_func
     else:
         return "No similar sentence found.", -1.0
 
-def nmt_translate(hindi_sentence, tokenizer, model, device):
-    """Neural Machine Translation using NLLB-200"""
-    if model is None or tokenizer is None:
+def nmt_translate(hindi_sentence, tokenizer, model, device, indic_processor):
+    """Neural Machine Translation using IndicTrans2 (indic-to-indic)"""
+    if model is None or tokenizer is None or indic_processor is None:
         return "NMT model not available", -1.0
-    
+
     try:
-        target_lang = "pan_Guru"
-        inputs = tokenizer(hindi_sentence, return_tensors="pt", truncation=True, padding=True)
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        
+        src_lang, tgt_lang = "hin_Deva", "pan_Guru"
+
+        batch = indic_processor.preprocess_batch([hindi_sentence], src_lang=src_lang, tgt_lang=tgt_lang)
+        inputs = tokenizer(batch, truncation=True, padding="longest", return_tensors="pt").to(device)
+
         with torch.no_grad():
             generated_tokens = model.generate(
                 **inputs,
-                forced_bos_token_id=tokenizer.convert_tokens_to_ids(target_lang),
-                max_length=512
+                use_cache=True,
+                min_length=0,
+                max_length=256,
+                num_beams=5,
             )
-        
-        translated_text = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+
+        with tokenizer.as_target_tokenizer():
+            decoded = tokenizer.batch_decode(
+                generated_tokens.detach().cpu().tolist(),
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True
+            )
+
+        translated_text = indic_processor.postprocess_batch(decoded, lang=tgt_lang)[0]
         return translated_text, 0.95
-        
+
     except Exception as e:
         return f"NMT Error: {str(e)}", -1.0
 
@@ -416,7 +429,8 @@ def translate_hindi_to_punjabi(hindi_sentence):
         hindi_sentence,
         model_cache['tokenizer'],
         model_cache['model'],
-        model_cache['device']
+        model_cache['device'],
+        model_cache['indic_processor']
     )
     
     print(f"✓ NMT translation: {nmt_result}")
