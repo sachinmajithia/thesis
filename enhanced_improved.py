@@ -24,6 +24,22 @@ try:
     import torch
     import sacrebleu
     from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
+    # IndicTransToolkit (and the trust_remote_code tokenizer IndicTrans2
+    # downloads at runtime) import PreTrainedTokenizerBase from
+    # transformers.tokenization_utils. Older transformers versions
+    # re-exported it there for backward compatibility; current versions only
+    # define it in transformers.tokenization_utils_base and dropped that
+    # re-export, so the bare import raises "cannot import name
+    # 'PreTrainedTokenizerBase' from 'transformers.tokenization_utils'".
+    # Restore the alias so both import paths work regardless of which
+    # transformers version is installed, instead of pinning/downgrading
+    # transformers (which risks breaking everything else that depends on it).
+    import transformers.tokenization_utils as _tokenization_utils
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase as _PreTrainedTokenizerBase
+    if not hasattr(_tokenization_utils, 'PreTrainedTokenizerBase'):
+        _tokenization_utils.PreTrainedTokenizerBase = _PreTrainedTokenizerBase
+
     from flask import Flask, render_template, request, jsonify, send_file
     from sentence_transformers import SentenceTransformer
     from sklearn.feature_extraction.text import TfidfVectorizer
