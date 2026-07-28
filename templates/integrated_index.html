@@ -326,23 +326,12 @@ loadHealth();
 // ---------------------------------------------------------------------------
 // Translation modes rendering (shared within Plagiarism Check tab results)
 // ---------------------------------------------------------------------------
-function methodBadge(method) {
-  const map = { Dictionary: 'blue', EBMT: 'teal', NMT: 'green', None: 'gray' };
-  return badge(method, map[method] || 'gray');
-}
-
 function renderModesHtml(modes) {
   const dict = modes.dictionary || {};
   const ebmt = modes.ebmt || {};
   const nmt = modes.nmt || {};
-  const agreement = modes.agreement || {};
-  const rec = modes.recommended || {};
 
   return `
-    <div class="card">
-      <h2>Recommended Output ${methodBadge(rec.method)}</h2>
-      <p style="font-size:16px; margin:6px 0 0 0;">${escapeHtml(rec.translation)}</p>
-    </div>
     <div class="grid3">
       <div class="card">
         <h2>Dictionary ${badge(dict.covered_fully ? 'Full coverage' : (dict.untranslated_words + ' word(s) missed'), dict.covered_fully ? 'green' : 'amber')}</h2>
@@ -357,15 +346,6 @@ function renderModesHtml(modes) {
         <h2>NMT Mode</h2>
         <p style="font-size:14.5px;">${escapeHtml(nmt.translation)}</p>
         ${nmt.confidence !== null && nmt.confidence >= 0 ? simBar(nmt.confidence, {label: 'Confidence', polarity: 'quality'}) : '<p class="empty-state">Not available (model not loaded)</p>'}
-      </div>
-    </div>
-    <div class="card">
-      <h2>Agreement Between EBMT and NMT</h2>
-      <p class="hint">How closely the two independent translation modes agree with each other — useful for the thesis evaluation chapter.</p>
-      <div class="grid3">
-        <div class="metric-box"><div class="label">BLEU (EBMT vs NMT)</div><div class="value">${agreement.bleu_ebmt_vs_nmt !== null && agreement.bleu_ebmt_vs_nmt !== undefined ? agreement.bleu_ebmt_vs_nmt.toFixed(1) : 'N/A'}</div></div>
-        <div class="metric-box"><div class="label">Semantic Similarity</div><div class="value">${agreement.semantic_similarity_ebmt_vs_nmt !== null && agreement.semantic_similarity_ebmt_vs_nmt !== undefined ? (agreement.semantic_similarity_ebmt_vs_nmt * 100).toFixed(0) + '%' : 'N/A'}</div></div>
-        <div class="metric-box"><div class="label">Recommended Method</div><div class="value" style="font-size:16px;">${escapeHtml(rec.method)}</div></div>
       </div>
     </div>`;
 }
@@ -415,10 +395,6 @@ function renderPlagiarismResult(data) {
         <div class="metric-box"><div class="label">Processing Time</div><div class="value">${data.processing_time}s</div></div>
       </div>
       ${simBar(summary.overall_similarity, {label: 'Overall similarity', labelWidth: 110})}
-    </div>
-    <div class="card">
-      <h2>Translation Used (${escapeHtml(data.translation_method)}) ${methodBadge(data.translation_method)}</h2>
-      <p style="font-size:14.5px;">${escapeHtml(data.translated_punjabi)}</p>
     </div>`;
 
   if (data.translation_modes) {
@@ -435,7 +411,7 @@ function renderPlagiarismResult(data) {
 
   const corpusMatchedInternet = internet.corpus_matched_results || {matches: [], total_matches: 0};
 
-  html += `<div class="card"><h2>Internet Matches — Corpus-Matched Content (${corpusMatchedInternet.total_matches}) ${badge(internet.search_method, 'blue')}</h2>`;
+  html += `<div class="card"><h2>Internet Matches (${corpusMatchedInternet.total_matches})</h2>`;
   html += `<p class="hint">Searched using the top corpus match's own text, since it may itself be sourced from a website - more likely to be a verbatim web hit than our own translation.</p>`;
   if (corpusMatchedInternet.matches && corpusMatchedInternet.matches.length) {
     html += corpusMatchedInternet.matches.slice(0, 5).map(renderInternetMatch).join('');
