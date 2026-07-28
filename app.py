@@ -261,6 +261,79 @@ class SentenceBasedSearcher:
 
         return hybrid_queries
 
+    def extract_semantic_keyphrases(self, text: str, top_n: int = 5,
+                                     ngram_range: Tuple[int, int] = (2, 5),
+                                     max_candidates: int = 150) -> List[str]:
+        """
+        Extract the most semantically important phrases from text (KeyBERT-
+        style), instead of using raw Hindi/Punjabi sentences as the search
+        query. Candidate n-gram phrases are embedded with the IndicSBERT
+        model and ranked by cosine similarity to the whole-text embedding;
+        Maximal Marginal Relevance then drops near-duplicate phrases so the
+        returned queries stay diverse.
+
+        Returns [] if the semantic model isn't loaded, so callers can fall
+        back to sentence-based queries.
+        """
+        semantic_model = model_cache.get('semantic_model')
+        if not text or not semantic_model:
+            return []
+
+        sentences = self.extract_sentences(text, top_n=20) or [text]
+
+        candidates = []
+        seen = set()
+        for sentence in sentences:
+            words = sentence.split()
+            for n in range(ngram_range[0], min(ngram_range[1], len(words)) + 1):
+                for i in range(len(words) - n + 1):
+                    if len(candidates) >= max_candidates:
+                        break
+                    phrase = re.sub(r'[.,!?;:\'"]+$', '', ' '.join(words[i:i + n])).strip()
+                    if len(phrase) > 8 and phrase.lower() not in seen:
+                        seen.add(phrase.lower())
+                        candidates.append(phrase)
+
+        if not candidates:
+            return []
+
+        try:
+            doc_embedding = semantic_model.encode([text], normalize_embeddings=True)[0]
+            candidate_embeddings = semantic_model.encode(candidates, normalize_embeddings=True)
+        except Exception as e:
+            print(f"⚠️ Semantic keyphrase embedding failed: {e}")
+            return []
+
+        doc_similarities = np.dot(candidate_embeddings, doc_embedding)
+
+        # Maximal Marginal Relevance: prefer phrases relevant to the whole
+        # text but not redundant with phrases already picked.
+        lambda_diversity = 0.7
+        selected_idx = []
+        remaining_idx = list(range(len(candidates)))
+
+        while remaining_idx and len(selected_idx) < top_n:
+            if not selected_idx:
+                best = max(remaining_idx, key=lambda i: doc_similarities[i])
+            else:
+                selected_embeddings = candidate_embeddings[selected_idx]
+
+                def mmr_score(i):
+                    redundancy = np.max(np.dot(selected_embeddings, candidate_embeddings[i]))
+                    return lambda_diversity * doc_similarities[i] - (1 - lambda_diversity) * redundancy
+
+                best = max(remaining_idx, key=mmr_score)
+            selected_idx.append(best)
+            remaining_idx.remove(best)
+
+        keyphrases = [candidates[i] for i in selected_idx]
+
+        print(f"🧠 Extracted {len(keyphrases)} semantic keyphrases (from {len(candidates)} candidates):")
+        for i, kp in enumerate(keyphrases, 1):
+            print(f"   {i}. {kp}")
+
+        return keyphrases
+
 # ============================================================================
 # 2. MODEL LOADING & INITIALIZATION
 # ============================================================================
@@ -1116,14 +1189,27 @@ def search_internet_google(query: str, max_results: int = 30, use_sentence_searc
     """
     try:
         print(f"\n🌐 Searching Google for similar content...")
-        print(f"📝 Search strategy: {'SENTENCE-BASED' if use_sentence_search else 'KEYWORD-BASED'}")
 
-        # Extract sentences if enabled
-        search_queries = [query]  # Default: use whole query
+        # Extract search queries if enabled
+        search_queries = [query]  # Default: use whole query (Hindi/Punjabi text as-is)
+        strategy = 'KEYWORD-BASED'
 
         if use_sentence_search and model_cache.get('sentence_searcher'):
             sentence_searcher = model_cache['sentence_searcher']
-            search_queries = sentence_searcher.create_sentence_queries(query, num_queries=5)
+
+            # Prefer semantic keyphrases (embedding-ranked, language-agnostic
+            # concepts) over sending the raw Hindi/Punjabi sentence as the
+            # query - this is what makes the search "semantic". Falls back
+            # to sentence-based queries if the semantic model isn't loaded.
+            semantic_queries = sentence_searcher.extract_semantic_keyphrases(query, top_n=5)
+            if semantic_queries:
+                search_queries = semantic_queries
+                strategy = 'SEMANTIC-KEYPHRASE'
+            else:
+                search_queries = sentence_searcher.create_sentence_queries(query, num_queries=5)
+                strategy = 'SENTENCE-BASED'
+
+        print(f"📝 Search strategy: {strategy}")
 
         all_matches = []
         seen_urls = set()
@@ -1695,7 +1781,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             },
             'total_matches': total_internet_matches,
             'max_similarity': highest_internet_similarity,
-            'search_method': 'sentence-based' if use_sentence_search else 'keyword-based'
+            'search_method': 'semantic' if use_sentence_search else 'keyword-based'
         },
 
         # Summary
@@ -1737,7 +1823,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             response_data['plagiarism_summary']['highest_internet_similarity'],
             processing_time,
             json.dumps(response_data),
-            'sentence-based' if use_sentence_search else 'keyword-based'))
+            'semantic' if use_sentence_search else 'keyword-based'))
 
         conn.commit()
         conn.close()
