@@ -1205,6 +1205,33 @@ def search_internet_bilingual(
     print(f"\n✅ Bilingual internet search complete: {len(all_matches)} unique results")
     return all_matches[:max_results]
 
+def _apply_semantic_similarity(query: str, matches: List[Dict]) -> List[Dict]:
+    """
+    Replace the rank-based similarity heuristic with a real semantic score:
+    cosine similarity between the query and each result's title+snippet,
+    using the same IndicSBERT model already used for corpus matching. This
+    is what makes the Google search "semantic" - relevance is judged by
+    meaning rather than by Google's result position. Falls back to the
+    existing rank-based score if the model isn't loaded.
+    """
+    semantic_model = model_cache.get('semantic_model')
+    if not semantic_model or not matches:
+        return matches
+
+    try:
+        texts = [f"{m.get('title', '')}. {m.get('snippet', '')}".strip() for m in matches]
+        embeddings = semantic_model.encode([query] + texts, normalize_embeddings=True)
+        query_embedding, result_embeddings = embeddings[0], embeddings[1:]
+        similarities = np.dot(result_embeddings, query_embedding)
+
+        for match, similarity in zip(matches, similarities):
+            match['similarity'] = float(similarity)
+            match['similarity_type'] = 'semantic'
+    except Exception as e:
+        print(f"⚠️ Semantic re-ranking failed, keeping rank-based similarity: {e}")
+
+    return matches
+
 def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
     """
     Perform actual Google search for a single query
@@ -1270,7 +1297,8 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                         }
                         matches.append(match)
 
-                    print(f"✅ Returning {len(matches)} Google API results")
+                    matches = _apply_semantic_similarity(query, matches)
+                    print(f"✅ Returning {len(matches)} Google API results (semantically re-ranked)")
 
                     return matches
 
@@ -1351,7 +1379,8 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                         }
                         matches.append(match)
 
-                    print(f"✅ Returning {len(matches)} SerpAPI results")
+                    matches = _apply_semantic_similarity(query, matches)
+                    print(f"✅ Returning {len(matches)} SerpAPI results (semantically re-ranked)")
                     return matches
 
                 elif response.status_code == 403:
