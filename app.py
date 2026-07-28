@@ -784,21 +784,60 @@ def jaccard_similarity(sentence1, sentence2):
 
     return len(intersection) / len(union)
 
-def ebmt_translate(hindi_sentence_to_translate, parallel_corpus, similarity_func):
-    """Example-Based Machine Translation using parallel corpus"""
-    best_match_punjabi = "Translation not found in corpus."
-    highest_similarity = -1.0
+def split_into_sentences(text: str) -> List[str]:
+    """
+    Split multi-line/multi-sentence text (e.g. a poem pasted as one block)
+    into individual lines/sentences. EBMT matches a whole input against a
+    single reference sentence via Jaccard similarity - comparing an entire
+    multi-line block to one short reference sentence dilutes the overlap
+    ratio and (almost) never scores high enough, even when every individual
+    line has an exact match in the parallel corpus. Splitting first lets
+    each line be matched on its own.
+    """
+    sentences = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            sentences.extend([s.strip() for s in sent_tokenize(line) if s.strip()])
+        except Exception:
+            sentences.append(line)
+    return sentences if sentences else ([text.strip()] if text.strip() else [])
 
-    for hindi_ref, punjabi_ref in parallel_corpus:
-        similarity = similarity_func(hindi_sentence_to_translate, hindi_ref)
-        if similarity > highest_similarity:
-            highest_similarity = similarity
-            best_match_punjabi = punjabi_ref
+def ebmt_translate(hindi_text, parallel_corpus, similarity_func):
+    """
+    Example-Based Machine Translation using parallel corpus. Matches the
+    input sentence-by-sentence (see split_into_sentences) rather than as one
+    block, so a multi-line input (e.g. a poem) can still be translated via
+    EBMT when every individual line has a confident match - a single line
+    without one falls the whole input back to "not found" so callers can
+    cascade to NMT.
+    """
+    sentences = split_into_sentences(hindi_text)
+    translated_lines = []
+    similarities = []
 
-    if highest_similarity >= 0.5:
-        return best_match_punjabi, highest_similarity
-    else:
+    for sentence in sentences:
+        best_match_punjabi = "Translation not found in corpus."
+        highest_similarity = -1.0
+
+        for hindi_ref, punjabi_ref in parallel_corpus:
+            similarity = similarity_func(sentence, hindi_ref)
+            if similarity > highest_similarity:
+                highest_similarity = similarity
+                best_match_punjabi = punjabi_ref
+
+        if highest_similarity < 0.5:
+            return "No similar sentence found.", -1.0
+
+        translated_lines.append(best_match_punjabi)
+        similarities.append(highest_similarity)
+
+    if not similarities:
         return "No similar sentence found.", -1.0
+
+    return '\n'.join(translated_lines), min(similarities)
 
 def nmt_translate(hindi_sentence, tokenizer, model, device):
     """Neural Machine Translation using NLLB-200"""
