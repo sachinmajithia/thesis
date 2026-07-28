@@ -1714,8 +1714,8 @@ def upload_document_corpus():
         if not allowed_file(file.filename):
             return jsonify({'success': False, 'error': f'File type not allowed. Allowed: {", ".join(app.config["ALLOWED_EXTENSIONS"])}'}), 400
 
-        # Get metadata
-        title = request.form.get('title', file.filename)
+        # Get metadata - the file name is always used as the title
+        title = file.filename
         tags = request.form.getlist('tags')
 
         # Save uploaded file temporarily
@@ -1779,26 +1779,16 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
 
     corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
 
-    # =========== STEP 3: INTERNET SEARCH (GOOGLE) - HINDI INPUT + TRANSLATED TEXT ===========
-    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - HINDI INPUT TEXT")
-    print("-" * 80)
-
-    hindi_internet_matches = search_internet_google(hindi_text, max_results=5, use_sentence_search=use_sentence_search)
-
-    print("\n[STEP 3b] INTERNET SEARCH (GOOGLE) - TRANSLATED TEXT")
-    print("-" * 80)
-
-    translated_internet_matches = search_internet_google(translated_punjabi, max_results=5, use_sentence_search=use_sentence_search)
-
-    # =========== STEP 3c: INTERNET SEARCH (GOOGLE) - TOP CORPUS-MATCHED TEXT ===========
-    # If the corpus already found a semantically matching document, search
-    # the internet with THAT document's actual text rather than only our own
-    # translation - a corpus document is often itself sourced from a
-    # website, so its real wording is far more likely to be a verbatim (or
-    # near-verbatim) hit online than our machine-translated Punjabi is.
+    # =========== STEP 3: INTERNET SEARCH (GOOGLE) - CORPUS-MATCHED TEXT ONLY ===========
+    # Only search the internet when the corpus already found a strong (>50%)
+    # semantic match, and always search with THAT document's own text rather
+    # than the raw Hindi input or our own translation - a corpus document is
+    # often itself sourced from a website, so its real wording is far more
+    # likely to be a verbatim (or near-verbatim) hit online.
+    CORPUS_MATCH_INTERNET_THRESHOLD = 0.5
     corpus_matched_internet_matches = []
-    if corpus_matches:
-        print("\n[STEP 3c] INTERNET SEARCH (GOOGLE) - CORPUS-MATCHED TEXT")
+    if corpus_matches and corpus_matches[0]['similarity'] > CORPUS_MATCH_INTERNET_THRESHOLD:
+        print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - CORPUS-MATCHED TEXT (>50% SIMILARITY)")
         print("-" * 80)
 
         top_corpus_match = corpus_matches[0]
@@ -1814,14 +1804,8 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             use_sentence_search=use_sentence_search
         )
 
-    total_internet_matches = (
-        len(hindi_internet_matches) + len(translated_internet_matches) + len(corpus_matched_internet_matches)
-    )
-    highest_internet_similarity = max(
-        max([m['similarity'] for m in hindi_internet_matches], default=0),
-        max([m['similarity'] for m in translated_internet_matches], default=0),
-        max([m['similarity'] for m in corpus_matched_internet_matches], default=0)
-    )
+    total_internet_matches = len(corpus_matched_internet_matches)
+    highest_internet_similarity = max([m['similarity'] for m in corpus_matched_internet_matches], default=0)
 
     #=========== PREPARE RESPONSE ===========
     processing_time = (datetime.now() - start_time).total_seconds()
@@ -1842,31 +1826,15 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'max_similarity': max([m['similarity'] for m in corpus_matches], default=0)
         },
 
-        # Internet Results - three separate top-5 lists: searched with the
-        # original Hindi input, with the translated text, and (when a corpus
-        # match exists) with that corpus document's own text. 'matches' is
-        # also kept as a flat combined list for callers that still expect
-        # the pre-existing single-array shape.
+        # Internet Results - only ever searched using the top corpus match's
+        # own text (when corpus similarity is >50%). 'matches' is also kept
+        # as a flat list for callers that expect that shape.
         'internet_results': {
-            'matches': sorted(
-                hindi_internet_matches + translated_internet_matches + corpus_matched_internet_matches,
-                key=lambda m: m['similarity'],
-                reverse=True
-            ),
-            'hindi_results': {
-                'total_matches': len(hindi_internet_matches),
-                'matches': hindi_internet_matches[:5],
-                'max_similarity': max([m['similarity'] for m in hindi_internet_matches], default=0)
-            },
-            'translated_results': {
-                'total_matches': len(translated_internet_matches),
-                'matches': translated_internet_matches[:5],
-                'max_similarity': max([m['similarity'] for m in translated_internet_matches], default=0)
-            },
+            'matches': corpus_matched_internet_matches,
             'corpus_matched_results': {
                 'total_matches': len(corpus_matched_internet_matches),
                 'matches': corpus_matched_internet_matches[:5],
-                'max_similarity': max([m['similarity'] for m in corpus_matched_internet_matches], default=0)
+                'max_similarity': highest_internet_similarity
             },
             'total_matches': total_internet_matches,
             'max_similarity': highest_internet_similarity,

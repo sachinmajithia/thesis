@@ -157,32 +157,17 @@
 
 <div class="container">
   <nav class="tabs">
-    <button class="tab-btn active" data-tab="translate">Translate &amp; Compare</button>
-    <button class="tab-btn" data-tab="check">Plagiarism Check</button>
+    <button class="tab-btn active" data-tab="check">Plagiarism Check</button>
     <button class="tab-btn" data-tab="upload">Upload Document</button>
     <button class="tab-btn" data-tab="corpus">Corpus Manager</button>
   </nav>
 
-  <!-- ============ TAB: TRANSLATE & COMPARE ============ -->
-  <div class="tab-panel active" id="tab-translate">
-    <div class="card">
-      <h2>Translate Hindi → Punjabi</h2>
-      <p class="hint">Runs Dictionary, EBMT and NMT independently and shows both translation modes side-by-side, plus their agreement metrics.</p>
-      <textarea id="translateInput" placeholder="यहाँ हिंदी टेक्स्ट लिखें... (e.g. मुझे पानी चाहिए.)"></textarea>
-      <br>
-      <button class="primary" id="btnCompare" onclick="runCompare()">Compare Both Modes</button>
-      <div class="loading" id="compareLoading" style="display:none;">Translating…</div>
-    </div>
-    <div id="compareResult"></div>
-  </div>
-
   <!-- ============ TAB: PLAGIARISM CHECK (TEXT) ============ -->
-  <div class="tab-panel" id="tab-check">
+  <div class="tab-panel active" id="tab-check">
     <div class="card">
       <h2>Plagiarism Check — Text Input</h2>
       <p class="hint">Translates the Hindi input (both modes), then matches the translated Punjabi against the local corpus and the internet.</p>
       <textarea id="checkInput" placeholder="यहाँ हिंदी टेक्स्ट लिखें..."></textarea><br>
-      <label class="check"><input type="checkbox" id="checkSentenceSearch" checked> Also search with English translation (widens open-web matches)</label><br>
       <button class="primary" id="btnCheck" onclick="runPlagiarismCheck()">Run Plagiarism Check</button>
       <div class="loading" id="checkLoading" style="display:none;">Running translation + corpus + internet search…</div>
     </div>
@@ -196,7 +181,6 @@
       <p class="hint">Upload a .txt, .pdf, .docx or .doc file. The extracted text runs through the full translation + corpus + internet pipeline.</p>
       <div class="drop-zone" id="dropZonePlag">Drag &amp; drop a file here, or click to choose one<br><input type="file" id="fileInputPlag" accept=".txt,.pdf,.docx,.doc" style="display:none;"></div>
       <div id="filenameChipPlag"></div>
-      <label class="check"><input type="checkbox" id="uploadSentenceSearch" checked> Also search with English translation (widens open-web matches)</label><br>
       <button class="primary" id="btnUploadCheck" onclick="runUploadPlagiarism()">Upload &amp; Check</button>
       <div class="loading" id="uploadCheckLoading" style="display:none;">Extracting text and running full check…</div>
     </div>
@@ -204,15 +188,27 @@
 
     <div class="card">
       <h2>Add a Document to the Corpus</h2>
-      <p class="hint">Adds this document to the reference corpus used for future plagiarism matching.</p>
+      <p class="hint">Adds this document to the reference corpus used for future plagiarism matching. The file name is used as the title.</p>
       <div class="drop-zone" id="dropZoneCorpus">Drag &amp; drop a file here, or click to choose one<br><input type="file" id="fileInputCorpus" accept=".txt,.pdf,.docx,.doc" style="display:none;"></div>
       <div id="filenameChipCorpus"></div>
       <br>
-      <input type="text" id="corpusTitle" placeholder="Title (optional)">
       <input type="text" id="corpusTags" placeholder="Tags, comma separated (optional)">
       <br>
       <button class="primary" id="btnUploadCorpus" onclick="runUploadCorpus()">Add to Corpus</button>
       <div id="uploadCorpusStatus"></div>
+    </div>
+
+    <div class="card">
+      <h2>Add to Corpus via Text</h2>
+      <p class="hint">Add a corpus entry directly by typing a title and pasting its content, without uploading a file.</p>
+      <input type="text" id="corpusTextTitle" placeholder="Title" style="width:100%;">
+      <br><br>
+      <textarea id="corpusTextContent" placeholder="Paste or type the document content here..."></textarea>
+      <br>
+      <input type="text" id="corpusTextTags" placeholder="Tags, comma separated (optional)">
+      <br>
+      <button class="primary" id="btnAddCorpusText" onclick="runAddCorpusText()">Add to Corpus</button>
+      <div id="addCorpusTextStatus"></div>
     </div>
   </div>
 
@@ -319,21 +315,16 @@ async function loadHealth() {
     const h = await res.json();
     const dot = document.getElementById('healthDot');
     const text = document.getElementById('healthText');
-    if (h.models_loaded) {
-      dot.className = 'dot on';
-      text.textContent = `NMT + semantic models loaded (${h.semantic_model_source || 'unknown source'}) · Dictionary: ${h.dictionary_size} pairs · EBMT corpus: ${h.ebmt_corpus_size} pairs · ${h.corpus_size} corpus docs`;
-    } else {
-      dot.className = 'dot off';
-      text.textContent = `Running in Dictionary + EBMT fallback mode (NMT model not loaded) · Dictionary: ${h.dictionary_size} pairs · EBMT corpus: ${h.ebmt_corpus_size} pairs · ${h.corpus_size} corpus docs`;
-    }
+    dot.className = h.models_loaded ? 'dot on' : 'dot off';
+    text.textContent = 'Developed by Sachin Majithia';
   } catch (e) {
-    document.getElementById('healthText').textContent = 'Could not reach server health endpoint.';
+    document.getElementById('healthText').textContent = 'Developed by Sachin Majithia';
   }
 }
 loadHealth();
 
 // ---------------------------------------------------------------------------
-// Translation modes rendering (shared by Translate tab and Plagiarism Check tab)
+// Translation modes rendering (shared within Plagiarism Check tab results)
 // ---------------------------------------------------------------------------
 function methodBadge(method) {
   const map = { Dictionary: 'blue', EBMT: 'teal', NMT: 'green', None: 'gray' };
@@ -377,25 +368,6 @@ function renderModesHtml(modes) {
         <div class="metric-box"><div class="label">Recommended Method</div><div class="value" style="font-size:16px;">${escapeHtml(rec.method)}</div></div>
       </div>
     </div>`;
-}
-
-async function runCompare() {
-  const hindiText = document.getElementById('translateInput').value.trim();
-  const out = document.getElementById('compareResult');
-  const loading = document.getElementById('compareLoading');
-  if (!hindiText) { out.innerHTML = `<div class="status-msg err">Please enter some Hindi text.</div>`; return; }
-  document.getElementById('btnCompare').disabled = true;
-  loading.style.display = 'block';
-  out.innerHTML = '';
-  try {
-    const data = await postJSON('/api/translate/compare', {hindi_text: hindiText});
-    out.innerHTML = renderModesHtml(data);
-  } catch (e) {
-    out.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
-  } finally {
-    loading.style.display = 'none';
-    document.getElementById('btnCompare').disabled = false;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -461,25 +433,7 @@ function renderPlagiarismResult(data) {
   }
   html += `</div>`;
 
-  const hindiInternet = internet.hindi_results || {matches: [], total_matches: 0};
-  const translatedInternet = internet.translated_results || {matches: [], total_matches: 0};
   const corpusMatchedInternet = internet.corpus_matched_results || {matches: [], total_matches: 0};
-
-  html += `<div class="card"><h2>Internet Matches — Hindi Input Text (${hindiInternet.total_matches}) ${badge(internet.search_method, 'blue')}</h2>`;
-  if (hindiInternet.matches && hindiInternet.matches.length) {
-    html += hindiInternet.matches.slice(0, 5).map(renderInternetMatch).join('');
-  } else {
-    html += `<div class="empty-state">No internet matches found for the Hindi input text.</div>`;
-  }
-  html += `</div>`;
-
-  html += `<div class="card"><h2>Internet Matches — Translated Text (${translatedInternet.total_matches}) ${badge(internet.search_method, 'blue')}</h2>`;
-  if (translatedInternet.matches && translatedInternet.matches.length) {
-    html += translatedInternet.matches.slice(0, 5).map(renderInternetMatch).join('');
-  } else {
-    html += `<div class="empty-state">No internet matches found for the translated text.</div>`;
-  }
-  html += `</div>`;
 
   html += `<div class="card"><h2>Internet Matches — Corpus-Matched Content (${corpusMatchedInternet.total_matches}) ${badge(internet.search_method, 'blue')}</h2>`;
   html += `<p class="hint">Searched using the top corpus match's own text, since it may itself be sourced from a website - more likely to be a verbatim web hit than our own translation.</p>`;
@@ -495,7 +449,6 @@ function renderPlagiarismResult(data) {
 
 async function runPlagiarismCheck() {
   const hindiText = document.getElementById('checkInput').value.trim();
-  const useSentenceSearch = document.getElementById('checkSentenceSearch').checked;
   const out = document.getElementById('checkResult');
   const loading = document.getElementById('checkLoading');
   if (!hindiText) { out.innerHTML = `<div class="status-msg err">Please enter some Hindi text.</div>`; return; }
@@ -503,7 +456,7 @@ async function runPlagiarismCheck() {
   loading.style.display = 'block';
   out.innerHTML = '';
   try {
-    const data = await postJSON('/api/plagiarism-check/text', {hindi_text: hindiText, use_sentence_search: useSentenceSearch});
+    const data = await postJSON('/api/plagiarism-check/text', {hindi_text: hindiText});
     out.innerHTML = renderPlagiarismResult(data);
   } catch (e) {
     out.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
@@ -545,10 +498,8 @@ async function runUploadPlagiarism() {
   const out = document.getElementById('uploadCheckResult');
   const loading = document.getElementById('uploadCheckLoading');
   if (!input.files.length) { out.innerHTML = `<div class="status-msg err">Please choose a file first.</div>`; return; }
-  const useSentenceSearch = document.getElementById('uploadSentenceSearch').checked;
   const fd = new FormData();
   fd.append('file', input.files[0]);
-  fd.append('use_sentence_search', useSentenceSearch ? 'true' : 'false');
 
   document.getElementById('btnUploadCheck').disabled = true;
   loading.style.display = 'block';
@@ -573,7 +524,6 @@ async function runUploadCorpus() {
   if (!input.files.length) { statusEl.innerHTML = `<div class="status-msg err">Please choose a file first.</div>`; return; }
   const fd = new FormData();
   fd.append('file', input.files[0]);
-  fd.append('title', document.getElementById('corpusTitle').value);
   const tags = document.getElementById('corpusTags').value.split(',').map(t => t.trim()).filter(Boolean);
   tags.forEach(t => fd.append('tags', t));
 
@@ -586,6 +536,36 @@ async function runUploadCorpus() {
     statusEl.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
   } finally {
     document.getElementById('btnUploadCorpus').disabled = false;
+  }
+}
+
+async function runAddCorpusText() {
+  const titleEl = document.getElementById('corpusTextTitle');
+  const contentEl = document.getElementById('corpusTextContent');
+  const statusEl = document.getElementById('addCorpusTextStatus');
+  const title = titleEl.value.trim();
+  const content = contentEl.value.trim();
+  if (!title) { statusEl.innerHTML = `<div class="status-msg err">Please enter a title.</div>`; return; }
+  if (!content) { statusEl.innerHTML = `<div class="status-msg err">Please enter some content.</div>`; return; }
+  const tags = document.getElementById('corpusTextTags').value.split(',').map(t => t.trim()).filter(Boolean);
+  // Filename must be unique per corpus entry - derive one from the title
+  // plus a timestamp so repeated/duplicate titles don't collide.
+  const filename = title.replace(/[^\w\-]+/g, '_').slice(0, 60) + '_' + Date.now() + '.txt';
+
+  document.getElementById('btnAddCorpusText').disabled = true;
+  statusEl.innerHTML = `<div class="loading">Adding and embedding…</div>`;
+  try {
+    const data = await postJSON('/api/corpus/add', {filename, title, content, tags});
+    statusEl.innerHTML = `<div class="status-msg ${data.success ? 'ok' : 'err'}">${escapeHtml(data.message || data.error)} (corpus size: ${data.corpus_size})</div>`;
+    if (data.success) {
+      titleEl.value = '';
+      contentEl.value = '';
+      document.getElementById('corpusTextTags').value = '';
+    }
+  } catch (e) {
+    statusEl.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
+  } finally {
+    document.getElementById('btnAddCorpusText').disabled = false;
   }
 }
 
