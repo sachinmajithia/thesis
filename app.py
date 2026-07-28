@@ -823,6 +823,37 @@ def nmt_translate(hindi_sentence, tokenizer, model, device):
     except Exception as e:
         return f"NMT Error: {str(e)}", -1.0
 
+def translate_to_english(text: str) -> str:
+    """
+    Translate Hindi/Punjabi text to English via NLLB, so internet search can
+    also query in English - most open-web plagiarism sources are English,
+    so a same-script search alone misses them regardless of query quality.
+    """
+    if not text or not text.strip() or not model_cache.get('loaded'):
+        return ""
+
+    try:
+        tokenizer = model_cache['tokenizer']
+        model = model_cache['model']
+        device = model_cache['device']
+        target_lang = "eng_Latn"
+
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            generated_tokens = model.generate(
+                **inputs,
+                forced_bos_token_id=tokenizer.convert_tokens_to_ids(target_lang),
+                max_length=512
+            )
+
+        return tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+
+    except Exception as e:
+        print(f"⚠️ English translation for search failed: {e}")
+        return ""
+
 def translate_hindi_to_punjabi(hindi_sentence):
     """Main translation function with cascade approach: Dictionary -> EBMT -> NMT"""
     print(f"\n🔄 Translating Hindi to Punjabi: '{hindi_sentence}'")
@@ -1175,7 +1206,12 @@ class EnhancedCorpusManager:
 # 5. ENHANCED INTERNET SEARCH WITH SENTENCE-BASED APPROACH
 # ============================================================================
 
-def search_internet_google(query: str, max_results: int = 30, use_sentence_search: bool = True) -> List[Dict]:
+def search_internet_google(
+    query: str,
+    max_results: int = 30,
+    use_sentence_search: bool = True,
+    include_english_gloss: bool = True
+) -> List[Dict]:
     """
     Search Google for similar content using sentence-based approach
 
@@ -1183,6 +1219,10 @@ def search_internet_google(query: str, max_results: int = 30, use_sentence_searc
         query: Input text to search (usually translated Punjabi)
         max_results: Maximum number of results
         use_sentence_search: If True, use sentence-based search instead of keyword-level
+        include_english_gloss: If True, also search with an English translation
+            of the query - most open-web plagiarism sources are English, so a
+            Hindi/Punjabi-only search misses matches a same-script search
+            never surfaces, regardless of query quality.
 
     Returns:
         List of search results with similarity scores
@@ -1208,6 +1248,17 @@ def search_internet_google(query: str, max_results: int = 30, use_sentence_searc
             else:
                 search_queries = sentence_searcher.create_sentence_queries(query, num_queries=5)
                 strategy = 'SENTENCE-BASED'
+
+            if include_english_gloss:
+                english_gloss = translate_to_english(query)
+                if english_gloss.strip() and english_gloss.strip().lower() != query.strip().lower():
+                    english_queries = sentence_searcher.extract_semantic_keyphrases(english_gloss, top_n=3)
+                    if not english_queries:
+                        english_queries = [english_gloss[:150]]
+                    for eq in english_queries:
+                        if eq not in search_queries:
+                            search_queries.append(eq)
+                    strategy += '+ENGLISH-GLOSS'
 
         print(f"📝 Search strategy: {strategy}")
 
