@@ -1790,10 +1790,37 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
 
     translated_internet_matches = search_internet_google(translated_punjabi, max_results=5, use_sentence_search=use_sentence_search)
 
-    total_internet_matches = len(hindi_internet_matches) + len(translated_internet_matches)
+    # =========== STEP 3c: INTERNET SEARCH (GOOGLE) - TOP CORPUS-MATCHED TEXT ===========
+    # If the corpus already found a semantically matching document, search
+    # the internet with THAT document's actual text rather than only our own
+    # translation - a corpus document is often itself sourced from a
+    # website, so its real wording is far more likely to be a verbatim (or
+    # near-verbatim) hit online than our machine-translated Punjabi is.
+    corpus_matched_internet_matches = []
+    if corpus_matches:
+        print("\n[STEP 3c] INTERNET SEARCH (GOOGLE) - CORPUS-MATCHED TEXT")
+        print("-" * 80)
+
+        top_corpus_match = corpus_matches[0]
+        # content_preview may end with a literal "..." truncation marker -
+        # strip it so it isn't sent as part of the exact-phrase query.
+        corpus_query_text = top_corpus_match['content_preview']
+        if corpus_query_text.endswith('...'):
+            corpus_query_text = corpus_query_text[:-3]
+
+        corpus_matched_internet_matches = search_internet_google(
+            corpus_query_text,
+            max_results=5,
+            use_sentence_search=use_sentence_search
+        )
+
+    total_internet_matches = (
+        len(hindi_internet_matches) + len(translated_internet_matches) + len(corpus_matched_internet_matches)
+    )
     highest_internet_similarity = max(
         max([m['similarity'] for m in hindi_internet_matches], default=0),
-        max([m['similarity'] for m in translated_internet_matches], default=0)
+        max([m['similarity'] for m in translated_internet_matches], default=0),
+        max([m['similarity'] for m in corpus_matched_internet_matches], default=0)
     )
 
     #=========== PREPARE RESPONSE ===========
@@ -1815,13 +1842,14 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'max_similarity': max([m['similarity'] for m in corpus_matches], default=0)
         },
 
-        # Internet Results - two separate top-5 lists: one searched with the
-        # original Hindi input, one searched with the translated text.
-        # 'matches' is also kept as a flat combined list for callers that
-        # still expect the pre-existing single-array shape.
+        # Internet Results - three separate top-5 lists: searched with the
+        # original Hindi input, with the translated text, and (when a corpus
+        # match exists) with that corpus document's own text. 'matches' is
+        # also kept as a flat combined list for callers that still expect
+        # the pre-existing single-array shape.
         'internet_results': {
             'matches': sorted(
-                hindi_internet_matches + translated_internet_matches,
+                hindi_internet_matches + translated_internet_matches + corpus_matched_internet_matches,
                 key=lambda m: m['similarity'],
                 reverse=True
             ),
@@ -1834,6 +1862,11 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
                 'total_matches': len(translated_internet_matches),
                 'matches': translated_internet_matches[:5],
                 'max_similarity': max([m['similarity'] for m in translated_internet_matches], default=0)
+            },
+            'corpus_matched_results': {
+                'total_matches': len(corpus_matched_internet_matches),
+                'matches': corpus_matched_internet_matches[:5],
+                'max_similarity': max([m['similarity'] for m in corpus_matched_internet_matches], default=0)
             },
             'total_matches': total_internet_matches,
             'max_similarity': highest_internet_similarity,
