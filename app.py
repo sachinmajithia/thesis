@@ -1215,7 +1215,10 @@ def search_internet_google(
     """
     Search Google for similar content, searching the whole input paragraph
     as a single query - not split into per-sentence/keyphrase queries - so
-    paragraph-level context and word order are preserved.
+    paragraph-level context and word order are preserved. Also issues a
+    quoted exact-phrase query so verbatim copies (same content, no changes)
+    are actually retrieved from Google rather than ranked out by an
+    unquoted, relevance-only search.
 
     Args:
         query: Input paragraph to search (usually translated Punjabi)
@@ -1238,8 +1241,19 @@ def search_internet_google(
         MAX_QUERY_CHARS = 300
         clean_query = query.strip()[:MAX_QUERY_CHARS]
 
-        search_queries = [clean_query]  # Whole paragraph, as a single query
-        strategy = 'WHOLE-PARAGRAPH'
+        # An unquoted query lets Google match on term overlap/relevance, so a
+        # page that is a verbatim copy can still rank below unrelated pages
+        # and never even make it into the (small) result set we fetch. A
+        # quoted exact-phrase query forces Google to only return pages
+        # containing that literal text, which is what actually catches
+        # word-for-word copies. Kept short (not the full paragraph) since a
+        # very long quoted phrase breaks on the smallest formatting
+        # difference.
+        EXACT_PHRASE_CHARS = 120
+        exact_phrase_query = f'"{clean_query[:EXACT_PHRASE_CHARS]}"'
+
+        search_queries = [exact_phrase_query, clean_query]
+        strategy = 'EXACT-PHRASE+WHOLE-PARAGRAPH'
 
         if use_sentence_search and include_english_gloss and model_cache.get('loaded'):
             english_gloss = translate_to_english(clean_query).strip()
@@ -1252,10 +1266,14 @@ def search_internet_google(
         all_matches = []
         seen_urls = set()
 
-        # Perform search for each query (whole paragraph, plus English gloss)
+        # Perform search for each query (exact phrase, whole paragraph, plus
+        # English gloss). Always ask Google for a full page of results per
+        # query (its own per-call max) rather than splitting max_results
+        # across queries, so the real source has the best chance of being
+        # in what we fetch before we rank/trim down to max_results.
         for i, search_query in enumerate(search_queries, 1):
             print(f"\n📌 Searching with Query {i}/{len(search_queries)}: '{search_query[:80]}...'")
-            matches = _perform_google_search(search_query, max_results // len(search_queries) + 2)
+            matches = _perform_google_search(search_query, 10)
 
             for match in matches:
                 url = match['url']
