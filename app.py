@@ -1646,7 +1646,14 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
 
         # Internet Results - two separate top-5 lists: one searched with the
         # original Hindi input, one searched with the translated text.
+        # 'matches' is also kept as a flat combined list for callers that
+        # still expect the pre-existing single-array shape.
         'internet_results': {
+            'matches': sorted(
+                hindi_internet_matches + translated_internet_matches,
+                key=lambda m: m['similarity'],
+                reverse=True
+            ),
             'hindi_results': {
                 'total_matches': len(hindi_internet_matches),
                 'matches': hindi_internet_matches[:5],
