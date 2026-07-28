@@ -182,7 +182,7 @@
       <h2>Plagiarism Check — Text Input</h2>
       <p class="hint">Translates the Hindi input (both modes), then matches the translated Punjabi against the local corpus and the internet.</p>
       <textarea id="checkInput" placeholder="यहाँ हिंदी टेक्स्ट लिखें..."></textarea><br>
-      <label class="check"><input type="checkbox" id="checkSentenceSearch" checked> Use semantic internet search (keyphrases, not raw text)</label><br>
+      <label class="check"><input type="checkbox" id="checkSentenceSearch" checked> Also search with English translation (widens open-web matches)</label><br>
       <button class="primary" id="btnCheck" onclick="runPlagiarismCheck()">Run Plagiarism Check</button>
       <div class="loading" id="checkLoading" style="display:none;">Running translation + corpus + internet search…</div>
     </div>
@@ -196,7 +196,7 @@
       <p class="hint">Upload a .txt, .pdf, .docx or .doc file. The extracted text runs through the full translation + corpus + internet pipeline.</p>
       <div class="drop-zone" id="dropZonePlag">Drag &amp; drop a file here, or click to choose one<br><input type="file" id="fileInputPlag" accept=".txt,.pdf,.docx,.doc" style="display:none;"></div>
       <div id="filenameChipPlag"></div>
-      <label class="check"><input type="checkbox" id="uploadSentenceSearch" checked> Use semantic internet search (keyphrases, not raw text)</label><br>
+      <label class="check"><input type="checkbox" id="uploadSentenceSearch" checked> Also search with English translation (widens open-web matches)</label><br>
       <button class="primary" id="btnUploadCheck" onclick="runUploadPlagiarism()">Upload &amp; Check</button>
       <div class="loading" id="uploadCheckLoading" style="display:none;">Extracting text and running full check…</div>
     </div>

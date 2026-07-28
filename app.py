@@ -1203,7 +1203,7 @@ class EnhancedCorpusManager:
             return []
 
 # ============================================================================
-# 5. ENHANCED INTERNET SEARCH WITH SENTENCE-BASED APPROACH
+# 5. ENHANCED INTERNET SEARCH - WHOLE-PARAGRAPH + ENGLISH-GLOSS APPROACH
 # ============================================================================
 
 def search_internet_google(
@@ -1213,16 +1213,18 @@ def search_internet_google(
     include_english_gloss: bool = True
 ) -> List[Dict]:
     """
-    Search Google for similar content using sentence-based approach
+    Search Google for similar content, searching the whole input paragraph
+    as a single query - not split into per-sentence/keyphrase queries - so
+    paragraph-level context and word order are preserved.
 
     Args:
-        query: Input text to search (usually translated Punjabi)
+        query: Input paragraph to search (usually translated Punjabi)
         max_results: Maximum number of results
-        use_sentence_search: If True, use sentence-based search instead of keyword-level
-        include_english_gloss: If True, also search with an English translation
-            of the query - most open-web plagiarism sources are English, so a
-            Hindi/Punjabi-only search misses matches a same-script search
-            never surfaces, regardless of query quality.
+        use_sentence_search: If True, also search with an English gloss of
+            the paragraph (name kept for API/UI compatibility)
+        include_english_gloss: Secondary gate on the English-gloss search -
+            most open-web plagiarism sources are English, so a same-script
+            query alone misses them regardless of query quality.
 
     Returns:
         List of search results with similarity scores
@@ -1230,42 +1232,27 @@ def search_internet_google(
     try:
         print(f"\n🌐 Searching Google for similar content...")
 
-        # Extract search queries if enabled
-        search_queries = [query]  # Default: use whole query (Hindi/Punjabi text as-is)
-        strategy = 'KEYWORD-BASED'
+        # Google's relevance quality degrades sharply on very long queries
+        # (e.g. a whole uploaded document), so cap each query to roughly one
+        # paragraph's worth of text.
+        MAX_QUERY_CHARS = 300
+        clean_query = query.strip()[:MAX_QUERY_CHARS]
 
-        if use_sentence_search and model_cache.get('sentence_searcher'):
-            sentence_searcher = model_cache['sentence_searcher']
+        search_queries = [clean_query]  # Whole paragraph, as a single query
+        strategy = 'WHOLE-PARAGRAPH'
 
-            # Prefer semantic keyphrases (embedding-ranked, language-agnostic
-            # concepts) over sending the raw Hindi/Punjabi sentence as the
-            # query - this is what makes the search "semantic". Falls back
-            # to sentence-based queries if the semantic model isn't loaded.
-            semantic_queries = sentence_searcher.extract_semantic_keyphrases(query, top_n=5)
-            if semantic_queries:
-                search_queries = semantic_queries
-                strategy = 'SEMANTIC-KEYPHRASE'
-            else:
-                search_queries = sentence_searcher.create_sentence_queries(query, num_queries=5)
-                strategy = 'SENTENCE-BASED'
-
-            if include_english_gloss:
-                english_gloss = translate_to_english(query)
-                if english_gloss.strip() and english_gloss.strip().lower() != query.strip().lower():
-                    english_queries = sentence_searcher.extract_semantic_keyphrases(english_gloss, top_n=3)
-                    if not english_queries:
-                        english_queries = [english_gloss[:150]]
-                    for eq in english_queries:
-                        if eq not in search_queries:
-                            search_queries.append(eq)
-                    strategy += '+ENGLISH-GLOSS'
+        if use_sentence_search and include_english_gloss and model_cache.get('loaded'):
+            english_gloss = translate_to_english(clean_query).strip()
+            if english_gloss and english_gloss.lower() != clean_query.lower():
+                search_queries.append(english_gloss[:MAX_QUERY_CHARS])
+                strategy += '+ENGLISH-GLOSS'
 
         print(f"📝 Search strategy: {strategy}")
 
         all_matches = []
         seen_urls = set()
 
-        # Perform searches for each sentence
+        # Perform search for each query (whole paragraph, plus English gloss)
         for i, search_query in enumerate(search_queries, 1):
             print(f"\n📌 Searching with Query {i}/{len(search_queries)}: '{search_query[:80]}...'")
             matches = _perform_google_search(search_query, max_results // len(search_queries) + 2)
@@ -1832,7 +1819,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             },
             'total_matches': total_internet_matches,
             'max_similarity': highest_internet_similarity,
-            'search_method': 'semantic' if use_sentence_search else 'keyword-based'
+            'search_method': 'whole-paragraph+english-gloss' if use_sentence_search else 'whole-paragraph'
         },
 
         # Summary
@@ -1874,7 +1861,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             response_data['plagiarism_summary']['highest_internet_similarity'],
             processing_time,
             json.dumps(response_data),
-            'semantic' if use_sentence_search else 'keyword-based'))
+            'whole-paragraph+english-gloss' if use_sentence_search else 'whole-paragraph'))
 
         conn.commit()
         conn.close()
