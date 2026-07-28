@@ -330,6 +330,8 @@ function renderModesHtml(modes) {
   const dict = modes.dictionary || {};
   const ebmt = modes.ebmt || {};
   const nmt = modes.nmt || {};
+  const agreement = modes.agreement || {};
+  const rec = modes.recommended || {};
 
   return `
     <div class="grid3">
@@ -346,6 +348,15 @@ function renderModesHtml(modes) {
         <h2>NMT Mode</h2>
         <p style="font-size:14.5px;">${escapeHtml(nmt.translation)}</p>
         ${nmt.confidence !== null && nmt.confidence >= 0 ? simBar(nmt.confidence, {label: 'Confidence', polarity: 'quality'}) : '<p class="empty-state">Not available (model not loaded)</p>'}
+      </div>
+    </div>
+    <div class="card">
+      <h2>Agreement Between EBMT and NMT</h2>
+      <p class="hint">How closely the two independent translation modes agree with each other — useful for the thesis evaluation chapter.</p>
+      <div class="grid3">
+        <div class="metric-box"><div class="label">BLEU (EBMT vs NMT)</div><div class="value">${agreement.bleu_ebmt_vs_nmt !== null && agreement.bleu_ebmt_vs_nmt !== undefined ? agreement.bleu_ebmt_vs_nmt.toFixed(1) : 'N/A'}</div></div>
+        <div class="metric-box"><div class="label">Semantic Similarity</div><div class="value">${agreement.semantic_similarity_ebmt_vs_nmt !== null && agreement.semantic_similarity_ebmt_vs_nmt !== undefined ? (agreement.semantic_similarity_ebmt_vs_nmt * 100).toFixed(0) + '%' : 'N/A'}</div></div>
+        <div class="metric-box"><div class="label">Recommended Method</div><div class="value" style="font-size:16px;">${escapeHtml(rec.method)}</div></div>
       </div>
     </div>`;
 }
