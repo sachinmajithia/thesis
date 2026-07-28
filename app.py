@@ -1608,11 +1608,22 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
 
     corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
 
-    # =========== STEP 3: INTERNET SEARCH (GOOGLE) WITH SENTENCE-BASED APPROACH ===========
-    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED FOR TRANSLATED CONTENT")
+    # =========== STEP 3: INTERNET SEARCH (GOOGLE) - HINDI INPUT + TRANSLATED TEXT ===========
+    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - HINDI INPUT TEXT")
     print("-" * 80)
 
-    internet_matches = search_internet_google(translated_punjabi, max_results=30, use_sentence_search=use_sentence_search)
+    hindi_internet_matches = search_internet_google(hindi_text, max_results=5, use_sentence_search=use_sentence_search)
+
+    print("\n[STEP 3b] INTERNET SEARCH (GOOGLE) - TRANSLATED TEXT")
+    print("-" * 80)
+
+    translated_internet_matches = search_internet_google(translated_punjabi, max_results=5, use_sentence_search=use_sentence_search)
+
+    total_internet_matches = len(hindi_internet_matches) + len(translated_internet_matches)
+    highest_internet_similarity = max(
+        max([m['similarity'] for m in hindi_internet_matches], default=0),
+        max([m['similarity'] for m in translated_internet_matches], default=0)
+    )
 
     #=========== PREPARE RESPONSE ===========
     processing_time = (datetime.now() - start_time).total_seconds()
@@ -1633,26 +1644,36 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'max_similarity': max([m['similarity'] for m in corpus_matches], default=0)
         },
 
-        # Internet Results
+        # Internet Results - two separate top-5 lists: one searched with the
+        # original Hindi input, one searched with the translated text.
         'internet_results': {
-            'total_matches': len(internet_matches),
-            'matches': internet_matches[:40],
-            'max_similarity': max([m['similarity'] for m in internet_matches], default=0),
+            'hindi_results': {
+                'total_matches': len(hindi_internet_matches),
+                'matches': hindi_internet_matches[:5],
+                'max_similarity': max([m['similarity'] for m in hindi_internet_matches], default=0)
+            },
+            'translated_results': {
+                'total_matches': len(translated_internet_matches),
+                'matches': translated_internet_matches[:5],
+                'max_similarity': max([m['similarity'] for m in translated_internet_matches], default=0)
+            },
+            'total_matches': total_internet_matches,
+            'max_similarity': highest_internet_similarity,
             'search_method': 'sentence-based' if use_sentence_search else 'keyword-based'
         },
 
         # Summary
         'plagiarism_summary': {
-            'total_matches': len(corpus_matches) + len(internet_matches),
+            'total_matches': len(corpus_matches) + total_internet_matches,
             'corpus_matches': len(corpus_matches),
-            'internet_matches': len(internet_matches),
+            'internet_matches': total_internet_matches,
             'highest_corpus_similarity': max([m['similarity'] for m in corpus_matches], default=0),
-            'highest_internet_similarity': max([m['similarity'] for m in internet_matches], default=0),
+            'highest_internet_similarity': highest_internet_similarity,
             'overall_similarity': max(
                 max([m['similarity'] for m in corpus_matches], default=0),
-                max([m['similarity'] for m in internet_matches], default=0)
+                highest_internet_similarity
             ),
-            'plagiarism_detected': len(corpus_matches) > 0 or len(internet_matches) > 0
+            'plagiarism_detected': len(corpus_matches) > 0 or total_internet_matches > 0
         },
         'processing_time': round(processing_time, 2)
     }
@@ -1676,7 +1697,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             (hindi_text, 'hindi', translated_punjabi, corpus_manager.corpus_cache.get('corpus_size', 0),
             len(corpus_matches),
             response_data['plagiarism_summary']['highest_corpus_similarity'],
-            len(internet_matches),
+            total_internet_matches,
             response_data['plagiarism_summary']['highest_internet_similarity'],
             processing_time,
             json.dumps(response_data),

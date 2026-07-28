@@ -461,11 +461,22 @@ function renderPlagiarismResult(data) {
   }
   html += `</div>`;
 
-  html += `<div class="card"><h2>Internet Matches (${internet.total_matches}) ${badge(internet.search_method, 'blue')}</h2>`;
-  if (internet.matches && internet.matches.length) {
-    html += internet.matches.slice(0, 15).map(renderInternetMatch).join('');
+  const hindiInternet = internet.hindi_results || {matches: [], total_matches: 0};
+  const translatedInternet = internet.translated_results || {matches: [], total_matches: 0};
+
+  html += `<div class="card"><h2>Internet Matches — Hindi Input Text (${hindiInternet.total_matches}) ${badge(internet.search_method, 'blue')}</h2>`;
+  if (hindiInternet.matches && hindiInternet.matches.length) {
+    html += hindiInternet.matches.slice(0, 5).map(renderInternetMatch).join('');
   } else {
-    html += `<div class="empty-state">No internet matches found.</div>`;
+    html += `<div class="empty-state">No internet matches found for the Hindi input text.</div>`;
+  }
+  html += `</div>`;
+
+  html += `<div class="card"><h2>Internet Matches — Translated Text (${translatedInternet.total_matches}) ${badge(internet.search_method, 'blue')}</h2>`;
+  if (translatedInternet.matches && translatedInternet.matches.length) {
+    html += translatedInternet.matches.slice(0, 5).map(renderInternetMatch).join('');
+  } else {
+    html += `<div class="empty-state">No internet matches found for the translated text.</div>`;
   }
   html += `</div>`;
 
