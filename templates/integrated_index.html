@@ -161,6 +161,7 @@
     <button class="tab-btn" data-tab="check">Plagiarism Check</button>
     <button class="tab-btn" data-tab="upload">Upload Document</button>
     <button class="tab-btn" data-tab="corpus">Corpus Manager</button>
+    <button class="tab-btn" data-tab="history">History</button>
   </nav>
 
   <!-- ============ TAB: TRANSLATE & COMPARE ============ -->
@@ -235,6 +236,16 @@
       <div id="corpusTableWrap"><div class="empty-state">Loading…</div></div>
     </div>
   </div>
+
+  <!-- ============ TAB: HISTORY ============ -->
+  <div class="tab-panel" id="tab-history">
+    <div class="card">
+      <h2>Plagiarism Check History <button class="danger" style="float:right;" onclick="clearAllHistory()">Clear All</button><button class="secondary" style="float:right; margin-right:8px;" onclick="loadHistory()">Refresh</button></h2>
+      <p class="hint">Every plagiarism check you run is saved here. Reopen one to see its full results again, or delete entries you no longer need.</p>
+      <div id="historyTableWrap"><div class="empty-state">Loading…</div></div>
+    </div>
+    <div id="historyDetail"></div>
+  </div>
 </div>
 
 <script>
@@ -307,6 +318,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'corpus') { loadCorpus(); loadCorpusStats(); }
+    if (btn.dataset.tab === 'history') { loadHistory(); }
   });
 });
 
@@ -636,6 +648,84 @@ async function deleteCorpusDoc(encodedFilename) {
     await postJSON('/api/corpus/delete', {filename});
     loadCorpus();
     loadCorpusStats();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// History tab
+// ---------------------------------------------------------------------------
+function truncateText(text, maxLen) {
+  if (!text) return '';
+  return text.length > maxLen ? text.slice(0, maxLen) + '…' : text;
+}
+
+async function loadHistory() {
+  const wrap = document.getElementById('historyTableWrap');
+  wrap.innerHTML = `<div class="empty-state">Loading…</div>`;
+  try {
+    const res = await fetch('/api/history/list');
+    const data = await res.json();
+    const items = data.history || [];
+    if (!items.length) {
+      wrap.innerHTML = `<div class="empty-state">No plagiarism checks yet. Results from the "Plagiarism Check" and "Upload Document" tabs will appear here.</div>`;
+      return;
+    }
+    wrap.innerHTML = `
+      <table>
+        <thead><tr><th>Query</th><th>Matches</th><th>Max Similarity</th><th>Checked</th><th></th></tr></thead>
+        <tbody>
+          ${items.map(h => `
+            <tr>
+              <td>${escapeHtml(truncateText(h.query_content, 70))}</td>
+              <td>${(h.corpus_matches || 0) + (h.internet_matches || 0)}</td>
+              <td>${((Math.max(h.max_corpus_similarity || 0, h.max_internet_similarity || 0)) * 100).toFixed(0)}%</td>
+              <td>${h.check_timestamp ? new Date(h.check_timestamp.replace(' ', 'T')).toLocaleString() : ''}</td>
+              <td>
+                <button class="secondary" onclick="viewHistoryItem(${h.id})">View</button>
+                <button class="danger" onclick="deleteHistoryItem(${h.id})">Delete</button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch (e) {
+    wrap.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function viewHistoryItem(id) {
+  const detail = document.getElementById('historyDetail');
+  detail.innerHTML = `<div class="loading">Loading check #${id}…</div>`;
+  try {
+    const res = await fetch(`/api/history/${id}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Could not load this history entry');
+    const result = data.result;
+    detail.innerHTML = `<div class="card"><h2>Check #${id} — ${result.check_timestamp ? new Date(result.check_timestamp.replace(' ', 'T')).toLocaleString() : ''}</h2></div>` + renderPlagiarismResult(result);
+    detail.scrollIntoView({behavior: 'smooth', block: 'start'});
+  } catch (e) {
+    detail.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function deleteHistoryItem(id) {
+  if (!confirm(`Delete check #${id} from history?`)) return;
+  try {
+    await postJSON('/api/history/delete', {id});
+    document.getElementById('historyDetail').innerHTML = '';
+    loadHistory();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function clearAllHistory() {
+  if (!confirm('Delete ALL plagiarism check history? This cannot be undone.')) return;
+  try {
+    await postJSON('/api/history/clear', {});
+    document.getElementById('historyDetail').innerHTML = '';
+    loadHistory();
   } catch (e) {
     alert(e.message);
   }
