@@ -522,7 +522,29 @@ df_dict = pd.DataFrame(data_dict)
 df_dict.to_csv('hindi_punjabi_dictionary.csv', index=False, encoding='utf-8')
 dictionary_df = pd.read_csv('hindi_punjabi_dictionary.csv', encoding='utf-8')
 translation_dict = dict(zip(dictionary_df['Hindi'], dictionary_df['Punjabi']))
-print(f"✓ Dictionary loaded: {len(translation_dict)} word pairs")
+print(f"✓ Built-in dictionary loaded: {len(translation_dict)} word pairs")
+
+# Optionally extend the dictionary with a much larger word list derived from
+# a real Hindi-Punjabi corpus (see build_parallel_corpus.py, which mines this
+# file from Samanantar via statistical word alignment - this sandbox has no
+# internet access to build it, so it's opt-in and only used if present). The
+# hand-verified built-in pairs above always win on conflicts, since the
+# extended pairs are statistically derived and occasionally noisy.
+EXTENDED_DICTIONARY_PATH = os.path.join('data', 'hindi_punjabi_dictionary_extended.csv')
+if os.path.exists(EXTENDED_DICTIONARY_PATH):
+    try:
+        extended_dict_df = pd.read_csv(EXTENDED_DICTIONARY_PATH, encoding='utf-8')
+        added = 0
+        for hindi_word, punjabi_word in zip(extended_dict_df['Hindi'], extended_dict_df['Punjabi']):
+            if hindi_word not in translation_dict:
+                translation_dict[hindi_word] = punjabi_word
+                added += 1
+        print(f"✓ Extended dictionary merged: +{added} additional word pairs "
+              f"(from '{EXTENDED_DICTIONARY_PATH}')")
+    except Exception as e:
+        print(f"⚠️ Could not load extended dictionary '{EXTENDED_DICTIONARY_PATH}': {e}")
+
+print(f"✓ Dictionary ready: {len(translation_dict)} word pairs total")
 
 # ----------------------------------------------------------------------------
 # 3b. Parallel Corpus (EBMT examples)
@@ -687,12 +709,41 @@ df_corpus = pd.DataFrame(data_corpus)
 df_corpus.to_csv('parallel_corpus.csv', index=False, encoding='utf-8')
 df_corpus_loaded = pd.read_csv('parallel_corpus.csv', encoding='utf-8')
 parallel_corpus = list(df_corpus_loaded.itertuples(index=False, name=None))
-print(f"✓ Parallel corpus loaded: {len(parallel_corpus)} sentence pairs")
+print(f"✓ Built-in parallel corpus loaded: {len(parallel_corpus)} sentence pairs")
 
-# Also persist the same parallel corpus as the "custom dataset" consumed by
-# train_indicbert.py, so the EBMT examples and the IndicBERT fine-tuning
-# data stay in sync for the thesis write-up.
+# Optionally extend the parallel corpus with a much larger, real Hindi-Punjabi
+# sentence-pair set (see build_parallel_corpus.py, which derives it from the
+# published AI4Bharat Samanantar corpus via English-pivoted alignment - this
+# sandbox has no internet access to build it, so it's opt-in and only used if
+# present). Deduplicated against the built-in pairs above by Hindi sentence.
 os.makedirs('data', exist_ok=True)
+EXTENDED_CORPUS_PATH = os.path.join('data', 'parallel_corpus_extended.csv')
+if os.path.exists(EXTENDED_CORPUS_PATH):
+    try:
+        extended_corpus_df = pd.read_csv(EXTENDED_CORPUS_PATH, encoding='utf-8')
+        seen_hindi = {h for h, _ in parallel_corpus}
+        added = 0
+        for hindi_sentence, punjabi_sentence in zip(
+            extended_corpus_df['Hindi_Sentence'], extended_corpus_df['Punjabi_Sentence']
+        ):
+            if hindi_sentence not in seen_hindi:
+                parallel_corpus.append((hindi_sentence, punjabi_sentence))
+                seen_hindi.add(hindi_sentence)
+                added += 1
+        print(f"✓ Extended parallel corpus merged: +{added} additional sentence pairs "
+              f"(from '{EXTENDED_CORPUS_PATH}')")
+    except Exception as e:
+        print(f"⚠️ Could not load extended parallel corpus '{EXTENDED_CORPUS_PATH}': {e}")
+
+print(f"✓ Parallel corpus ready: {len(parallel_corpus)} sentence pairs total")
+
+# Also persist the same built-in parallel corpus as the "custom dataset"
+# consumed by train_indicbert.py by default, so the EBMT examples and the
+# IndicBERT fine-tuning data stay in sync for the thesis write-up.
+# build_parallel_corpus.py additionally writes a much larger
+# data/indicbert_training_data_extended.csv from the same real corpus it
+# derives, for fine-tuning on the full dataset (pass it via train_indicbert.py
+# --data data/indicbert_training_data_extended.csv).
 indicbert_dataset_path = os.path.join('data', 'indicbert_training_data.csv')
 if not os.path.exists(indicbert_dataset_path):
     pd.DataFrame({'hindi': _hindi_sentences, 'punjabi': _punjabi_sentences}).to_csv(

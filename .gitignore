@@ -9,6 +9,13 @@ corpus_database.db
 hindi_punjabi_dictionary.csv
 parallel_corpus.csv
 
+# Large generated datasets from build_parallel_corpus.py (real Samanantar-
+# derived corpus/dictionary) - regenerate with that script rather than
+# committing them; results depend on which machine/date they were pulled on.
+data/parallel_corpus_extended.csv
+data/indicbert_training_data_extended.csv
+data/hindi_punjabi_dictionary_extended.csv
+
 # Fine-tuned model checkpoints are large binary artifacts - regenerate them
 # with `python train_indicbert.py` rather than committing them.
 models/*
