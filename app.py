@@ -56,7 +56,7 @@ print("="*80)
 
 app = Flask(__name__)
 app.config.update({
-    'SECRET_KEY': 'integrated-system-key',
+    'SECRET_KEY': os.getenv('SECRET_KEY', 'integrated-system-key'),
     'UPLOAD_FOLDER': 'uploads',
     'CORPUS_FOLDER': 'corpus',
     'MAX_CONTENT_LENGTH': 50 * 1024 * 1024,  # Increased to 50MB
@@ -2562,6 +2562,13 @@ if __name__ == '__main__':
     print("\nPress CTRL+C to stop the server\n")
 
     try:
-        app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)
+        # Debug mode enables Werkzeug's interactive debugger, which allows
+        # arbitrary code execution from the browser - never enable it on a
+        # server reachable from the internet. Defaults to off; for local
+        # development only, run with FLASK_DEBUG=1. Production deployments
+        # should use gunicorn (see Dockerfile/docker-compose.yml) rather
+        # than this development server at all.
+        debug_mode = os.getenv('FLASK_DEBUG', '0').lower() in ('1', 'true', 'yes')
+        app.run(debug=debug_mode, host='0.0.0.0', port=5000, use_reloader=False)
     except Exception as e:
         print(f"\n❌ Error starting server: {e}")

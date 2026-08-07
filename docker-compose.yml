@@ -1,0 +1,41 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+    # Bind-mount the whole project directory rather than a named volume:
+    # the app writes its SQLite DB, corpus docs, and CSV data straight into
+    # this directory at fixed relative paths, so this is the simplest way
+    # to make all of it survive `docker compose down` / rebuilds / EC2
+    # reboots. It also means `git pull && docker compose up -d --build`
+    # deploys new code without losing any data.
+    volumes:
+      - .:/app
+      - hf_cache:/root/.cache/huggingface
+    expose:
+      - "5000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  # Named (not bind-mounted) so multi-GB model downloads survive container
+  # rebuilds without cluttering the project directory or git status.
+  hf_cache:
+  caddy_data:
+  caddy_config:

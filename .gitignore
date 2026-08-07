@@ -3,6 +3,10 @@ __pycache__/
 .venv/
 venv/
 
+# Real secrets/config for the Docker deployment - copy .env.example to .env
+# and never commit the filled-in version.
+.env
+
 uploads/
 corpus/
 corpus_database.db
