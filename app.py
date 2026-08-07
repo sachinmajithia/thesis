@@ -1924,7 +1924,18 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     print("\n[STEP 2] CROSS-LANGUAGE PLAGIARISM CHECK - CORPUS")
     print("-" * 80)
 
-    corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
+    # Search at a lower threshold than what we treat as a "confident" match.
+    # Our own Hindi->Punjabi translation rarely reproduces a source
+    # document's exact original wording, so a genuine source in the corpus
+    # can score below the confident-match bar on semantic similarity alone
+    # even though it's the same underlying content - but its real (verbatim)
+    # text is still by far the best internet-search query available for
+    # finding that source online (see STEP 3b below), so we keep candidates
+    # down to a looser threshold and only apply the stricter bar when
+    # deciding what counts as a shown/confirmed corpus match.
+    CORPUS_DISPLAY_THRESHOLD = 0.55
+    corpus_candidates = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.4)
+    corpus_matches = [m for m in corpus_candidates if m['similarity'] >= CORPUS_DISPLAY_THRESHOLD]
 
     # =========== STEP 3: INTERNET SEARCH (GOOGLE) - ALWAYS ON THE TRANSLATION ===========
     # Always search the internet using our own translated Punjabi text, not
@@ -1944,19 +1955,23 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     )
     seen_urls = {m['url'] for m in internet_matches if m.get('url')}
 
-    # STEP 3b: If the corpus ALSO found a strong (>50%) match, additionally
-    # search using that corpus document's own text - a corpus document is
-    # often itself sourced from a website, so its real wording can surface
-    # extra (or more precisely verbatim) hits beyond what our own
-    # translation turns up. This supplements, but no longer gates, the
-    # primary search above.
-    CORPUS_MATCH_INTERNET_THRESHOLD = 0.5
+    # STEP 3b: If the corpus ALSO found a candidate match - even one too weak
+    # to show as a confirmed corpus match (see CORPUS_DISPLAY_THRESHOLD
+    # above) - additionally search using THAT document's own text. A corpus
+    # document is often itself sourced from a website, so its real wording
+    # is a far more reliable internet query than our own round-trip
+    # translation, which is exactly why we don't require it to clear the
+    # stricter display threshold here: even a moderate semantic match is
+    # worth spending one extra internet query on. This supplements, but no
+    # longer gates, the primary search above.
+    CORPUS_MATCH_INTERNET_THRESHOLD = 0.4
     corpus_matched_internet_matches = []
-    if corpus_matches and corpus_matches[0]['similarity'] > CORPUS_MATCH_INTERNET_THRESHOLD:
-        print("\n[STEP 3b] INTERNET SEARCH (GOOGLE) - CORPUS-MATCHED TEXT (>50% SIMILARITY)")
+    if corpus_candidates and corpus_candidates[0]['similarity'] > CORPUS_MATCH_INTERNET_THRESHOLD:
+        print(f"\n[STEP 3b] INTERNET SEARCH (GOOGLE) - CORPUS-MATCHED TEXT "
+              f"(similarity {corpus_candidates[0]['similarity']:.2f})")
         print("-" * 80)
 
-        top_corpus_match = corpus_matches[0]
+        top_corpus_match = corpus_candidates[0]
         # content_preview may end with a literal "..." truncation marker -
         # strip it so it isn't sent as part of the exact-phrase query.
         corpus_query_text = top_corpus_match['content_preview']
