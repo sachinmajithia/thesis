@@ -160,6 +160,7 @@
     <button class="tab-btn active" data-tab="check">Plagiarism Check</button>
     <button class="tab-btn" data-tab="upload">Upload Document</button>
     <button class="tab-btn" data-tab="corpus">Corpus Manager</button>
+    <button class="tab-btn" data-tab="modecompare">Mode Comparison</button>
     <button class="tab-btn" data-tab="history">History</button>
   </nav>
 
@@ -221,6 +222,18 @@
       <h2>Documents <button class="secondary" style="float:right;" onclick="loadCorpus()">Refresh</button></h2>
       <div id="corpusTableWrap"><div class="empty-state">Loading…</div></div>
     </div>
+  </div>
+
+  <!-- ============ TAB: MODE COMPARISON (TF-IDF vs IndicSBERT) ============ -->
+  <div class="tab-panel" id="tab-modecompare">
+    <div class="card">
+      <h2>Sentence-Wise Mode Comparison</h2>
+      <p class="hint">Both modes use the same Dictionary → EBMT → NMT cascade translation; they only differ in how each translated sentence is compared against the corpus. <b>Mode 1</b>: Cascading Translation + TF-IDF (lexical/character n-gram similarity — best at near-verbatim copies). <b>Mode 2</b>: IndicSBERT (semantic embedding similarity — best at paraphrased/reworded content). Run per sentence so the better-performing mode can be identified for each one individually.</p>
+      <textarea id="modeCompareInput" placeholder="यहाँ हिंदी टेक्स्ट लिखें (एक से अधिक वाक्य हो सकते हैं)..."></textarea><br>
+      <button class="primary" id="btnModeCompare" onclick="runModeComparison()">Compare Modes (Sentence-wise)</button>
+      <div class="loading" id="modeCompareLoading" style="display:none;">Translating and scoring each sentence against the corpus…</div>
+    </div>
+    <div id="modeCompareResult"></div>
   </div>
 
   <!-- ============ TAB: HISTORY ============ -->
@@ -468,6 +481,77 @@ async function runPlagiarismCheck() {
   } finally {
     loading.style.display = 'none';
     document.getElementById('btnCheck').disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mode Comparison: TF-IDF (Mode 1) vs IndicSBERT (Mode 2), sentence-wise
+// ---------------------------------------------------------------------------
+function winnerBadge(winner) {
+  const map = {'Mode 1 (TF-IDF)': 'blue', 'Mode 2 (IndicSBERT)': 'teal', 'Tie': 'gray', 'N/A': 'gray'};
+  return badge(winner, map[winner] || 'gray');
+}
+
+function renderModeComparisonResult(data) {
+  const summary = data.summary || {};
+  const sentences = data.sentences || [];
+
+  let html = `
+    <div class="card">
+      <h2>Summary ${winnerBadge(summary.overall_better_mode)}</h2>
+      <div class="grid4">
+        <div class="metric-box"><div class="label">Sentences</div><div class="value">${summary.total_sentences}</div></div>
+        <div class="metric-box"><div class="label">Mode 1 Wins (TF-IDF)</div><div class="value">${summary.mode1_wins}</div></div>
+        <div class="metric-box"><div class="label">Mode 2 Wins (IndicSBERT)</div><div class="value">${summary.mode2_wins}</div></div>
+        <div class="metric-box"><div class="label">Ties</div><div class="value">${summary.ties}</div></div>
+      </div>
+      ${simBar(summary.mode1_avg_similarity, {label: 'Mode 1 avg similarity', polarity: 'quality', labelWidth: 150})}
+      ${simBar(summary.mode2_avg_similarity, {label: 'Mode 2 avg similarity', polarity: 'quality', labelWidth: 150})}
+    </div>`;
+
+  if (!sentences.length) {
+    return html + `<div class="card"><div class="empty-state">No sentences found in the input.</div></div>`;
+  }
+
+  html += `
+    <div class="card">
+      <h2>Per-Sentence Breakdown</h2>
+      <div style="overflow-x:auto;">
+      <table>
+        <thead><tr><th>Sentence</th><th>Translated</th><th>Mode 1 (TF-IDF)</th><th>Mode 2 (IndicSBERT)</th><th>Winner</th></tr></thead>
+        <tbody>
+          ${sentences.map(s => `
+            <tr>
+              <td style="max-width:220px;">${escapeHtml(s.sentence)}</td>
+              <td style="max-width:220px;">${escapeHtml(s.translated)} ${methodBadge(s.translation_method)}</td>
+              <td>${(s.mode1_tfidf.similarity * 100).toFixed(0)}%${s.mode1_tfidf.best_match ? `<br><span style="font-size:11.5px;color:var(--muted);">${escapeHtml(s.mode1_tfidf.best_match)}</span>` : ''}</td>
+              <td>${(s.mode2_indicsbert.similarity * 100).toFixed(0)}%${s.mode2_indicsbert.best_match ? `<br><span style="font-size:11.5px;color:var(--muted);">${escapeHtml(s.mode2_indicsbert.best_match)}</span>` : ''}</td>
+              <td>${winnerBadge(s.winner)}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      </div>
+    </div>`;
+
+  return html;
+}
+
+async function runModeComparison() {
+  const hindiText = document.getElementById('modeCompareInput').value.trim();
+  const out = document.getElementById('modeCompareResult');
+  const loading = document.getElementById('modeCompareLoading');
+  if (!hindiText) { out.innerHTML = `<div class="status-msg err">Please enter some Hindi text.</div>`; return; }
+  document.getElementById('btnModeCompare').disabled = true;
+  loading.style.display = 'block';
+  out.innerHTML = '';
+  try {
+    const data = await postJSON('/api/plagiarism-check/mode-comparison', {hindi_text: hindiText});
+    out.innerHTML = renderModeComparisonResult(data);
+  } catch (e) {
+    out.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
+  } finally {
+    loading.style.display = 'none';
+    document.getElementById('btnModeCompare').disabled = false;
   }
 }
 

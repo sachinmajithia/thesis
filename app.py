@@ -1349,6 +1349,140 @@ class EnhancedCorpusManager:
             return []
 
 # ============================================================================
+# 4b. SENTENCE-WISE DETECTION MODE COMPARISON: TF-IDF vs. IndicSBERT
+# Both modes share the same Dictionary -> EBMT -> NMT cascade translation
+# (see translate_hindi_to_punjabi) - they only differ in how the translated
+# Punjabi sentence is then compared against the corpus:
+#   Mode 1 (Cascading Translation + TF-IDF): lexical/character n-gram cosine
+#     similarity - catches near-verbatim copies and shared vocabulary, but
+#     is blind to paraphrasing.
+#   Mode 2 (IndicSBERT): semantic embedding cosine similarity (the
+#     fine-tuned IndicBERT / pretrained IndicSBERT model used elsewhere in
+#     this file) - catches reworded/paraphrased content that shares meaning
+#     but not exact wording, at the cost of being slower and occasionally
+#     over-generous on short sentences.
+# Run per sentence (not on the whole document as one blob) so each
+# sentence's better-performing mode can be identified individually, which is
+# what the diluted-similarity problem noted elsewhere in this file (see
+# split_into_sentences) would otherwise hide.
+# ============================================================================
+
+def compare_detection_modes_per_sentence(hindi_text: str) -> Dict:
+    """
+    For each sentence in hindi_text: translate via the standard cascade,
+    then score it against the corpus with both TF-IDF (Mode 1) and
+    IndicSBERT (Mode 2), and report which mode scored higher. Returns
+    per-sentence detail plus an aggregate summary (win counts, average
+    similarity per mode, overall better-performing mode).
+    """
+    sentences = split_into_sentences(hindi_text)
+    if not sentences:
+        return {
+            'sentences': [],
+            'summary': {
+                'total_sentences': 0, 'mode1_wins': 0, 'mode2_wins': 0, 'ties': 0,
+                'mode1_avg_similarity': 0.0, 'mode2_avg_similarity': 0.0,
+                'overall_better_mode': 'N/A'
+            }
+        }
+
+    if not corpus_cache['documents']:
+        corpus_manager._refresh_cache()
+    corpus_docs = corpus_cache['documents']
+
+    tfidf_vectorizer = model_cache.get('tfidf_vectorizer')
+    semantic_model = model_cache.get('semantic_model')
+    corpus_embeddings = corpus_cache.get('embeddings')
+
+    # Fit TF-IDF once on the corpus (not per sentence) so every sentence is
+    # scored against the same fixed vocabulary - fitting per-sentence would
+    # also work but re-vectorizes the whole corpus on every iteration for no
+    # benefit.
+    corpus_tfidf_matrix = None
+    if corpus_docs and tfidf_vectorizer is not None:
+        try:
+            corpus_tfidf_matrix = tfidf_vectorizer.fit_transform(corpus_docs)
+        except Exception as e:
+            print(f"⚠️ TF-IDF corpus fit failed: {e}")
+
+    per_sentence = []
+    mode1_wins = mode2_wins = ties = 0
+    mode1_scores, mode2_scores = [], []
+
+    for sentence in sentences:
+        translated, translation_method = translate_hindi_to_punjabi(sentence)
+        clean_translated = corpus_manager.normalize_text(translated)
+
+        # ---- Mode 1: TF-IDF lexical comparison ----
+        mode1_score, mode1_best_match = 0.0, None
+        if corpus_tfidf_matrix is not None and clean_translated:
+            try:
+                query_vec = tfidf_vectorizer.transform([clean_translated])
+                sims = cosine_similarity(query_vec, corpus_tfidf_matrix)[0]
+                best_idx = int(np.argmax(sims))
+                mode1_score = float(sims[best_idx])
+                mode1_best_match = corpus_cache['metadata'][best_idx]['filename']
+            except Exception as e:
+                print(f"⚠️ TF-IDF comparison failed for sentence: {e}")
+
+        # ---- Mode 2: IndicSBERT semantic comparison ----
+        mode2_score, mode2_best_match = 0.0, None
+        if corpus_embeddings is not None and semantic_model and clean_translated:
+            try:
+                query_embedding = semantic_model.encode([clean_translated], normalize_embeddings=True)[0]
+                sims = np.dot(corpus_embeddings, query_embedding)
+                best_idx = int(np.argmax(sims))
+                mode2_score = float(sims[best_idx])
+                mode2_best_match = corpus_cache['metadata'][best_idx]['filename']
+            except Exception as e:
+                print(f"⚠️ Semantic comparison failed for sentence: {e}")
+
+        if mode1_score > mode2_score:
+            winner = 'Mode 1 (TF-IDF)'
+            mode1_wins += 1
+        elif mode2_score > mode1_score:
+            winner = 'Mode 2 (IndicSBERT)'
+            mode2_wins += 1
+        else:
+            winner = 'Tie'
+            ties += 1
+
+        mode1_scores.append(mode1_score)
+        mode2_scores.append(mode2_score)
+
+        per_sentence.append({
+            'sentence': sentence,
+            'translated': translated,
+            'translation_method': translation_method,
+            'mode1_tfidf': {'similarity': round(mode1_score, 4), 'best_match': mode1_best_match},
+            'mode2_indicsbert': {'similarity': round(mode2_score, 4), 'best_match': mode2_best_match},
+            'winner': winner
+        })
+
+    n = len(per_sentence)
+    mode1_avg = sum(mode1_scores) / n if n else 0.0
+    mode2_avg = sum(mode2_scores) / n if n else 0.0
+    if mode1_wins > mode2_wins:
+        overall_better_mode = 'Mode 1 (TF-IDF)'
+    elif mode2_wins > mode1_wins:
+        overall_better_mode = 'Mode 2 (IndicSBERT)'
+    else:
+        overall_better_mode = 'Tie'
+
+    return {
+        'sentences': per_sentence,
+        'summary': {
+            'total_sentences': n,
+            'mode1_wins': mode1_wins,
+            'mode2_wins': mode2_wins,
+            'ties': ties,
+            'mode1_avg_similarity': round(mode1_avg, 4),
+            'mode2_avg_similarity': round(mode2_avg, 4),
+            'overall_better_mode': overall_better_mode
+        }
+    }
+
+# ============================================================================
 # 5. ENHANCED INTERNET SEARCH - WHOLE-PARAGRAPH + ENGLISH-GLOSS APPROACH
 # ============================================================================
 
@@ -2125,6 +2259,31 @@ def translate_compare():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/plagiarism-check/mode-comparison', methods=['POST'])
+def plagiarism_mode_comparison():
+    """
+    Sentence-wise comparison of the two corpus-matching modes: Mode 1
+    (Cascading Translation + TF-IDF lexical similarity) vs. Mode 2
+    (IndicSBERT semantic similarity). Both modes translate each sentence the
+    same way; they only differ in how the translated sentence is scored
+    against the corpus. Dedicated endpoint for the thesis's comparative
+    evaluation of lexical vs. semantic cross-language matching.
+    """
+    try:
+        data = request.get_json()
+        hindi_text = data.get('hindi_text', '').strip()
+
+        if not hindi_text:
+            return jsonify({'error': 'No Hindi text provided'}), 400
+
+        result = compare_detection_modes_per_sentence(hindi_text)
+        return jsonify({'success': True, **result})
+
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/corpus/add', methods=['POST'])
 def add_to_corpus_api():
     """Add text content to corpus"""
@@ -2375,6 +2534,7 @@ if __name__ == '__main__':
     print(" POST /api/upload/corpus - Upload document to add to corpus")
     print(" POST /api/plagiarism-check/text - Check plagiarism for text input (both translation modes)")
     print(" POST /api/translate/compare - Compare EBMT vs NMT translation modes")
+    print(" POST /api/plagiarism-check/mode-comparison - Compare TF-IDF vs IndicSBERT sentence-wise")
     print(" POST /api/corpus/add - Add text to corpus")
     print(" GET /api/corpus/list - List all corpus documents")
     print(" POST /api/corpus/delete - Delete document from corpus")
