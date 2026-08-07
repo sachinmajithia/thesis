@@ -1,0 +1,20 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.claude/
+
+# Generated/runtime data - the image creates empty versions of these; real
+# content is provided at runtime via the bind mount in docker-compose.yml,
+# not baked into the image.
+uploads/
+corpus/
+corpus_database.db
+hindi_punjabi_dictionary.csv
+parallel_corpus.csv
+data/*.csv
+models/*
+!models/.gitkeep

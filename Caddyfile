@@ -1,0 +1,17 @@
+# Caddy automatically requests and renews a free Let's Encrypt certificate
+# for {$DOMAIN} the first time it's reachable on port 80/443 from the
+# internet - no manual certbot steps needed. Requires a DNS A record for
+# DOMAIN pointing at this server's public IP *before* first start.
+{$DOMAIN} {
+	reverse_proxy app:5000 {
+		# NLLB-200/IndicSBERT inference and model cold-loads can take a
+		# while on a CPU-only instance - give the app plenty of headroom
+		# before Caddy gives up and returns a 502.
+		transport http {
+			dial_timeout 30s
+			response_header_timeout 300s
+		}
+	}
+
+	encode gzip
+}
