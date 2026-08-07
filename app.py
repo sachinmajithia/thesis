@@ -1926,16 +1926,34 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
 
     corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
 
-    # =========== STEP 3: INTERNET SEARCH (GOOGLE) - CORPUS-MATCHED TEXT ONLY ===========
-    # Only search the internet when the corpus already found a strong (>50%)
-    # semantic match, and always search with THAT document's own text rather
-    # than the raw Hindi input or our own translation - a corpus document is
-    # often itself sourced from a website, so its real wording is far more
-    # likely to be a verbatim (or near-verbatim) hit online.
+    # =========== STEP 3: INTERNET SEARCH (GOOGLE) - ALWAYS ON THE TRANSLATION ===========
+    # Always search the internet using our own translated Punjabi text, not
+    # only when the corpus already contains a similar document. Gating the
+    # internet search behind a corpus match meant a plagiarized document
+    # could only ever be found online if the original source had already
+    # been manually added to the local corpus first - which defeats the
+    # purpose of internet-based detection (the whole point is to catch
+    # copies of content that was never in the corpus to begin with).
+    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - TRANSLATED CONTENT")
+    print("-" * 80)
+
+    internet_matches = search_internet_google(
+        translated_punjabi,
+        max_results=15,
+        use_sentence_search=use_sentence_search
+    )
+    seen_urls = {m['url'] for m in internet_matches if m.get('url')}
+
+    # STEP 3b: If the corpus ALSO found a strong (>50%) match, additionally
+    # search using that corpus document's own text - a corpus document is
+    # often itself sourced from a website, so its real wording can surface
+    # extra (or more precisely verbatim) hits beyond what our own
+    # translation turns up. This supplements, but no longer gates, the
+    # primary search above.
     CORPUS_MATCH_INTERNET_THRESHOLD = 0.5
     corpus_matched_internet_matches = []
     if corpus_matches and corpus_matches[0]['similarity'] > CORPUS_MATCH_INTERNET_THRESHOLD:
-        print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - CORPUS-MATCHED TEXT (>50% SIMILARITY)")
+        print("\n[STEP 3b] INTERNET SEARCH (GOOGLE) - CORPUS-MATCHED TEXT (>50% SIMILARITY)")
         print("-" * 80)
 
         top_corpus_match = corpus_matches[0]
@@ -1950,9 +1968,16 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             max_results=5,
             use_sentence_search=use_sentence_search
         )
+        for m in corpus_matched_internet_matches:
+            url = m.get('url')
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                internet_matches.append(m)
 
-    total_internet_matches = len(corpus_matched_internet_matches)
-    highest_internet_similarity = max([m['similarity'] for m in corpus_matched_internet_matches], default=0)
+    internet_matches.sort(key=lambda m: m.get('similarity', 0), reverse=True)
+
+    total_internet_matches = len(internet_matches)
+    highest_internet_similarity = max([m['similarity'] for m in internet_matches], default=0)
 
     #=========== PREPARE RESPONSE ===========
     processing_time = (datetime.now() - start_time).total_seconds()
@@ -1973,15 +1998,17 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'max_similarity': max([m['similarity'] for m in corpus_matches], default=0)
         },
 
-        # Internet Results - only ever searched using the top corpus match's
-        # own text (when corpus similarity is >50%). 'matches' is also kept
-        # as a flat list for callers that expect that shape.
+        # Internet Results - always searched using our own translation, plus
+        # (when the corpus also found a strong match) a supplementary search
+        # using that corpus document's own text, merged and deduped by URL.
+        # 'corpus_matched_results' is kept for callers that specifically
+        # want just the corpus-sourced-query subset.
         'internet_results': {
-            'matches': corpus_matched_internet_matches,
+            'matches': internet_matches[:15],
             'corpus_matched_results': {
                 'total_matches': len(corpus_matched_internet_matches),
                 'matches': corpus_matched_internet_matches[:5],
-                'max_similarity': highest_internet_similarity
+                'max_similarity': max([m['similarity'] for m in corpus_matched_internet_matches], default=0)
             },
             'total_matches': total_internet_matches,
             'max_similarity': highest_internet_similarity,
