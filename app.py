@@ -1582,6 +1582,124 @@ def upload_document_corpus():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+def split_into_sentences(text: str) -> List[str]:
+    """
+    Split multi-line/multi-sentence Hindi text into individual sentences, so
+    fuse_sentence_similarity() below can score plagiarism similarity
+    sentence-by-sentence instead of diluting a whole paragraph into one
+    corpus query.
+    """
+    sentences = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            sentences.extend([s.strip() for s in sent_tokenize(line) if s.strip()])
+        except Exception:
+            sentences.append(line)
+    return sentences if sentences else ([text.strip()] if text.strip() else [])
+
+# ============================================================================
+# 4b. SENTENCE-WISE MAX-SIMILARITY FUSION (EBMT vs. NMT)
+# EBMT and NMT are independent translations of the same Hindi sentence (see
+# translate_both_modes): EBMT tends to win on sentences close to the parallel
+# corpus (near-exact reproductions, common phrasing), while NMT generalizes
+# better to sentences the corpus has never seen. Scoring a document against
+# the corpus using only the single cascade-selected translation (as the rest
+# of run_plagiarism_pipeline does for its whole-document, "recommended"
+# translation) means a real match can be missed if it only shows up against
+# the OTHER mode's phrasing. Translating each sentence via BOTH modes,
+# scoring each against the corpus independently, and fusing the two scores
+# by taking the max is a simple late-fusion strategy that lets each sentence
+# benefit from whichever mode fits it best, rather than being stuck with
+# whichever mode a generic cascade rule picked for the document as a whole.
+# ============================================================================
+
+def fuse_sentence_similarity(hindi_text: str, top_k: int = 3) -> Dict:
+    """
+    For each sentence in hindi_text: translate via BOTH EBMT and NMT
+    (translate_both_modes), score each translation against the corpus
+    independently, and fuse the two similarity scores by taking the max.
+
+    Returns per-sentence detail (both raw scores plus the fused/winning one)
+    and a document-level summary (max/average fused similarity, and how
+    often each mode contributed the winning score).
+    """
+    sentences = split_into_sentences(hindi_text)
+    if not sentences:
+        return {
+            'sentences': [],
+            'summary': {
+                'total_sentences': 0, 'ebmt_wins': 0, 'nmt_wins': 0, 'ties': 0,
+                'max_fused_similarity': 0.0, 'avg_fused_similarity': 0.0
+            }
+        }
+
+    per_sentence = []
+    ebmt_wins = nmt_wins = ties = 0
+    fused_scores = []
+
+    for sentence in sentences:
+        both_modes = translate_both_modes(sentence)
+        ebmt_text = both_modes['ebmt']['translation']
+        nmt_text = both_modes['nmt']['translation']
+        ebmt_translation_valid = ebmt_text not in ("Translation not found in corpus.", "No similar sentence found.")
+        nmt_translation_valid = bool(nmt_text) and 'Error' not in nmt_text and nmt_text not in ("Models not loaded", "NMT model not available")
+
+        # threshold=-1.0: we want the single best corpus candidate for each
+        # mode regardless of whether it clears any "confident match" bar -
+        # the fusion/winner decision below is what matters here, not display
+        # filtering (that already happens elsewhere, e.g. run_plagiarism_pipeline).
+        ebmt_matches = corpus_manager.search_corpus(ebmt_text, top_k=top_k, threshold=-1.0) if ebmt_translation_valid else []
+        nmt_matches = corpus_manager.search_corpus(nmt_text, top_k=top_k, threshold=-1.0) if nmt_translation_valid else []
+
+        ebmt_best = ebmt_matches[0] if ebmt_matches else None
+        nmt_best = nmt_matches[0] if nmt_matches else None
+        ebmt_score = ebmt_best['similarity'] if ebmt_best else 0.0
+        nmt_score = nmt_best['similarity'] if nmt_best else 0.0
+
+        if ebmt_score > nmt_score:
+            winning_mode, fused_score, fused_match = 'EBMT', ebmt_score, ebmt_best
+            ebmt_wins += 1
+        elif nmt_score > ebmt_score:
+            winning_mode, fused_score, fused_match = 'NMT', nmt_score, nmt_best
+            nmt_wins += 1
+        else:
+            winning_mode, fused_score, fused_match = 'Tie', ebmt_score, ebmt_best or nmt_best
+            ties += 1
+
+        fused_scores.append(fused_score)
+        per_sentence.append({
+            'sentence': sentence,
+            'ebmt': {
+                'translation': ebmt_text,
+                'similarity': round(ebmt_score, 4),
+                'best_match': ebmt_best['filename'] if ebmt_best else None
+            },
+            'nmt': {
+                'translation': nmt_text,
+                'similarity': round(nmt_score, 4),
+                'best_match': nmt_best['filename'] if nmt_best else None
+            },
+            'fused_similarity': round(fused_score, 4),
+            'winning_mode': winning_mode,
+            'best_match': fused_match['filename'] if fused_match else None
+        })
+
+    n = len(per_sentence)
+    return {
+        'sentences': per_sentence,
+        'summary': {
+            'total_sentences': n,
+            'ebmt_wins': ebmt_wins,
+            'nmt_wins': nmt_wins,
+            'ties': ties,
+            'max_fused_similarity': round(max(fused_scores, default=0.0), 4),
+            'avg_fused_similarity': round(sum(fused_scores) / n, 4) if n else 0.0
+        }
+    }
+
 def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -> Dict:
     """
     Core plagiarism-check pipeline shared by the text-input and
@@ -1608,6 +1726,25 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
 
     corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
 
+    # =========== STEP 2b: SENTENCE-WISE MAX-SIMILARITY FUSION (EBMT vs NMT) ===========
+    # The corpus check above only scores the corpus against the single
+    # cascade-selected ("recommended") whole-document translation. Re-check
+    # sentence-by-sentence using BOTH EBMT's and NMT's translation of each
+    # sentence, and fuse (max) the two per-sentence scores - this can surface
+    # a real match that the single recommended translation missed, since
+    # each mode's phrasing matches the corpus differently sentence-to-sentence.
+    print("\n[STEP 2b] SENTENCE-WISE MAX-SIMILARITY FUSION (EBMT vs NMT)")
+    print("-" * 80)
+
+    try:
+        sentence_fusion = fuse_sentence_similarity(hindi_text)
+    except Exception as e:
+        print(f"⚠️ Sentence-wise fusion failed: {e}")
+        sentence_fusion = {'sentences': [], 'summary': {
+            'total_sentences': 0, 'ebmt_wins': 0, 'nmt_wins': 0, 'ties': 0,
+            'max_fused_similarity': 0.0, 'avg_fused_similarity': 0.0
+        }}
+
     # =========== STEP 3: INTERNET SEARCH (GOOGLE) WITH SENTENCE-BASED APPROACH ===========
     print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED FOR TRANSLATED CONTENT")
     print("-" * 80)
@@ -1633,6 +1770,12 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'max_similarity': max([m['similarity'] for m in corpus_matches], default=0)
         },
 
+        # Sentence-wise max-similarity fusion of EBMT vs NMT (see
+        # fuse_sentence_similarity) - each sentence scored against the corpus
+        # via both translation modes, keeping the higher (max) of the two so
+        # the document benefits from whichever mode fits each sentence best.
+        'sentence_fusion': sentence_fusion,
+
         # Internet Results
         'internet_results': {
             'total_matches': len(internet_matches),
@@ -1648,9 +1791,14 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'internet_matches': len(internet_matches),
             'highest_corpus_similarity': max([m['similarity'] for m in corpus_matches], default=0),
             'highest_internet_similarity': max([m['similarity'] for m in internet_matches], default=0),
+            'highest_fused_sentence_similarity': sentence_fusion['summary']['max_fused_similarity'],
+            # Fused (max) of corpus, internet, and sentence-wise EBMT/NMT
+            # similarity - the strongest signal any single mode found, so a
+            # match one mode misses doesn't get diluted by averaging it away.
             'overall_similarity': max(
                 max([m['similarity'] for m in corpus_matches], default=0),
-                max([m['similarity'] for m in internet_matches], default=0)
+                max([m['similarity'] for m in internet_matches], default=0),
+                sentence_fusion['summary']['max_fused_similarity']
             ),
             'plagiarism_detected': len(corpus_matches) > 0 or len(internet_matches) > 0
         },
@@ -1729,6 +1877,30 @@ def translate_compare():
             return jsonify({'error': 'No Hindi text provided'}), 400
 
         result = translate_both_modes(hindi_text)
+        return jsonify({'success': True, **result})
+
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/plagiarism-check/sentence-fusion', methods=['POST'])
+def plagiarism_sentence_fusion():
+    """
+    Sentence-wise max-similarity fusion: for each sentence, translate via
+    BOTH EBMT and NMT, score each against the corpus independently, and fuse
+    the two scores by taking the max. Dedicated endpoint for the thesis's
+    evaluation of the fusion strategy on its own, separate from the full
+    plagiarism-check pipeline (which also includes it under 'sentence_fusion').
+    """
+    try:
+        data = request.get_json()
+        hindi_text = data.get('hindi_text', '').strip()
+
+        if not hindi_text:
+            return jsonify({'error': 'No Hindi text provided'}), 400
+
+        result = fuse_sentence_similarity(hindi_text)
         return jsonify({'success': True, **result})
 
     except Exception as e:
@@ -1875,6 +2047,7 @@ if __name__ == '__main__':
     print(" POST /api/upload/plagiarism-check - Upload document for plagiarism detection")
     print(" POST /api/upload/corpus - Upload document to add to corpus")
     print(" POST /api/plagiarism-check/text - Check plagiarism for text input (both translation modes)")
+    print(" POST /api/plagiarism-check/sentence-fusion - Sentence-wise max-similarity fusion (EBMT vs NMT)")
     print(" POST /api/translate/compare - Compare EBMT vs NMT translation modes")
     print(" POST /api/corpus/add - Add text to corpus")
     print(" GET /api/corpus/list - List all corpus documents")
