@@ -525,6 +525,192 @@ translation_dict = dict(zip(dictionary_df['Hindi'], dictionary_df['Punjabi']))
 print(f"✓ Dictionary loaded: {len(translation_dict)} word pairs")
 
 # ----------------------------------------------------------------------------
+# 3a-2. Dictionary-Based Machine Translation (DBMT) pipeline
+#
+# Implements the classical DBMT stages for the Hindi -> Punjabi dictionary
+# tier of the cascade, instead of a single naive word-substitution pass:
+#   1. Normalization      - Unicode NFC, whitespace cleanup
+#   2. Tokenization       - Devanagari-run-aware, keeps punctuation separate
+#   3. Phrase lookup       - longest-match multi-word entries first (e.g.
+#                           "शुभ रात्रि"), so multi-word dictionary rows are
+#                           actually reachable (a plain word-by-word pass
+#                           can never match them)
+#   4. Word lookup         - exact match against the single-word dictionary
+#   5. Stem lookup         - strip common Hindi inflectional suffixes and
+#                           retry, catching simple inflected forms that
+#                           aren't in the dictionary verbatim
+#   6. OOV transliteration - words with no dictionary/stem match are
+#                           transliterated Devanagari -> Gurmukhi character
+#                           by character (proper nouns, borrowings) rather
+#                           than left untranslated in the wrong script
+#   7. Reordering          - identity: Hindi and Punjabi share SOV word
+#                           order and adjective/postposition placement, so
+#                           no structural reordering is needed for this
+#                           language pair (unlike e.g. Hindi -> English)
+#   8. Output assembly     - punctuation-aware rejoining (no space before
+#                           । ॥ , . ? ! : ; )
+#
+# Note: target-side morphological *generation* (re-inflecting a translated
+# root for tense/gender/number/case) is intentionally not attempted here -
+# doing it correctly needs a real morphological generator, and a heuristic
+# one would silently produce wrong grammar. The dictionary instead stores
+# ready-to-use target forms, and the stemmer in step 5 is a best-effort
+# fallback, not a full morphological analyzer.
+# ----------------------------------------------------------------------------
+
+_DANDA = ('।', '॥')
+
+_TOKEN_RE = re.compile(r"[।॥]|[ऀ-ॣ०-ॿ]+|[^\sऀ-ॿ]+")
+
+_NO_SPACE_BEFORE = {'।', '॥', ',', '.', '?', '!', ':', ';', ')', '”', '’'}
+_NO_SPACE_AFTER = {'(', '“', '‘'}
+
+# Longest-first so e.g. "ियों" is tried before the shorter "ों"/"ी".
+_HINDI_SUFFIXES = ['ियों', 'ाओं', 'ओं', 'ों', 'ती', 'ता', 'ते', 'ना', 'ने', 'ा', 'ी', 'े']
+
+# Devanagari -> Gurmukhi character map (both scripts derive from Brahmi, so
+# most letters and matras line up one-to-one). Used only as a last-resort
+# fallback for OOV words so they don't stay untranslated in the wrong script.
+_DEVANAGARI_TO_GURMUKHI = {
+    'क्ष': 'ਕਸ਼', 'ज्ञ': 'ਗਿਆ',
+    'अ': 'ਅ', 'आ': 'ਆ', 'इ': 'ਇ', 'ई': 'ਈ', 'उ': 'ਉ', 'ऊ': 'ਊ',
+    'ए': 'ਏ', 'ऐ': 'ਐ', 'ओ': 'ਓ', 'औ': 'ਔ',
+    'क': 'ਕ', 'ख': 'ਖ', 'ग': 'ਗ', 'घ': 'ਘ', 'ङ': 'ਙ',
+    'च': 'ਚ', 'छ': 'ਛ', 'ज': 'ਜ', 'झ': 'ਝ', 'ञ': 'ਞ',
+    'ट': 'ਟ', 'ठ': 'ਠ', 'ड': 'ਡ', 'ढ': 'ਢ', 'ण': 'ਣ',
+    'त': 'ਤ', 'थ': 'ਥ', 'द': 'ਦ', 'ध': 'ਧ', 'न': 'ਨ',
+    'प': 'ਪ', 'फ': 'ਫ', 'ब': 'ਬ', 'भ': 'ਭ', 'म': 'ਮ',
+    'य': 'ਯ', 'र': 'ਰ', 'ल': 'ਲ', 'व': 'ਵ', 'ळ': 'ਲ਼',
+    'श': 'ਸ਼', 'ष': 'ਸ਼', 'स': 'ਸ', 'ह': 'ਹ',
+    'ा': 'ਾ', 'ि': 'ਿ', 'ी': 'ੀ', 'ु': 'ੁ', 'ू': 'ੂ',
+    'े': 'ੇ', 'ै': 'ੈ', 'ो': 'ੋ', 'ौ': 'ੌ', 'ॉ': 'ੋ',
+    'ं': 'ਂ', 'ँ': 'ਂ', 'ः': 'ਃ', '्': '੍',
+    '०': '੦', '१': '੧', '२': '੨', '३': '੩', '४': '੪',
+    '५': '੫', '६': '੬', '७': '੭', '८': '੮', '९': '੯',
+}
+
+
+def _is_devanagari_word(token: str) -> bool:
+    """True for a Devanagari word token (as opposed to danda punctuation
+    or a non-Devanagari token, both produced by dbmt_tokenize())."""
+    return token not in _DANDA and bool(re.match(r'^[ऀ-ॿ]+$', token))
+
+
+def dbmt_normalize(hindi_sentence: str) -> str:
+    """Step 1: Unicode normalization + whitespace cleanup."""
+    return re.sub(r'\s+', ' ', unicodedata.normalize('NFC', hindi_sentence)).strip()
+
+
+def dbmt_tokenize(normalized_sentence: str) -> List[str]:
+    """Step 2: split into Devanagari-word / danda / other-token pieces."""
+    return _TOKEN_RE.findall(normalized_sentence)
+
+
+def dbmt_stem(word: str) -> Optional[str]:
+    """Step 5: strip a common Hindi inflectional suffix, if any."""
+    for suffix in _HINDI_SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 2:
+            return word[:-len(suffix)]
+    return None
+
+
+def dbmt_transliterate(word: str) -> str:
+    """Step 6: OOV fallback, Devanagari -> Gurmukhi character mapping."""
+    chars = []
+    i = 0
+    while i < len(word):
+        conjunct = word[i:i + 2]
+        if conjunct in _DEVANAGARI_TO_GURMUKHI:
+            chars.append(_DEVANAGARI_TO_GURMUKHI[conjunct])
+            i += 2
+            continue
+        chars.append(_DEVANAGARI_TO_GURMUKHI.get(word[i], word[i]))
+        i += 1
+    return ''.join(chars)
+
+
+def dbmt_assemble(tokens: List[str]) -> str:
+    """Step 8: rejoin tokens, keeping punctuation attached without a leading space."""
+    out = ''
+    for i, tok in enumerate(tokens):
+        if i == 0 or tok in _NO_SPACE_BEFORE or (out and out[-1] in _NO_SPACE_AFTER):
+            out += tok
+        else:
+            out += ' ' + tok
+    return out
+
+
+# Multi-word dictionary entries (e.g. "शुभ रात्रि"), longest-first, so
+# dbmt_translate() can greedily match the longest phrase before falling
+# back to single-word lookup (step 3).
+_dbmt_phrase_entries = sorted(
+    (hindi.split() for hindi in translation_dict if ' ' in hindi),
+    key=len, reverse=True,
+)
+
+
+def dbmt_translate(hindi_sentence: str) -> Dict:
+    """
+    Full Dictionary-Based Machine Translation pipeline (steps 1-8 above).
+    Returns the translation plus coverage stats used both by the cascade
+    in translate_hindi_to_punjabi() and by translate_both_modes().
+    """
+    tokens = dbmt_tokenize(dbmt_normalize(hindi_sentence))
+
+    translated_tokens = []
+    exact_hits = stem_hits = untranslated = 0
+    i, n = 0, len(tokens)
+
+    while i < n:
+        token = tokens[i]
+
+        if not _is_devanagari_word(token):
+            translated_tokens.append(token)  # punctuation/digits/Latin pass through
+            i += 1
+            continue
+
+        # Step 3: longest-match multi-word phrase lookup
+        matched_phrase_len = 0
+        for phrase_words in _dbmt_phrase_entries:
+            plen = len(phrase_words)
+            if tokens[i:i + plen] == phrase_words:
+                translated_tokens.append(translation_dict[' '.join(phrase_words)])
+                matched_phrase_len = plen
+                break
+        if matched_phrase_len:
+            exact_hits += 1
+            i += matched_phrase_len
+            continue
+
+        # Step 4: exact single-word lookup
+        if token in translation_dict:
+            translated_tokens.append(translation_dict[token])
+            exact_hits += 1
+        else:
+            # Step 5: stem and retry
+            stem = dbmt_stem(token)
+            if stem and stem in translation_dict:
+                translated_tokens.append(translation_dict[stem])
+                stem_hits += 1
+            else:
+                # Step 6: transliteration fallback for OOV words
+                translated_tokens.append(dbmt_transliterate(token))
+                untranslated += 1
+        i += 1
+
+    total_words = sum(1 for t in tokens if _is_devanagari_word(t))
+    # Step 7 (reordering) is a no-op for Hindi -> Punjabi; see module note above.
+    return {
+        'translation': dbmt_assemble(translated_tokens),  # step 8
+        'covered_fully': untranslated == 0 and total_words > 0,
+        'total_words': total_words,
+        'exact_hits': exact_hits,
+        'stem_hits': stem_hits,
+        'untranslated_words': untranslated,
+    }
+
+
+# ----------------------------------------------------------------------------
 # 3b. Parallel Corpus (EBMT examples)
 # Expanded from 11 to 70 Hindi-Punjabi sentence pairs spanning greetings,
 # daily life, family, education, weather, work, travel, shopping, health,
@@ -754,23 +940,13 @@ def translate_hindi_to_punjabi(hindi_sentence):
     """Main translation function with cascade approach: Dictionary -> EBMT -> NMT"""
     print(f"\n🔄 Translating Hindi to Punjabi: '{hindi_sentence}'")
 
-    # 1. Dictionary-based translation
-    words = hindi_sentence.split()
-    translated_words = []
-    untranslated_count = 0
+    # 1. Dictionary-based translation (full DBMT pipeline, see dbmt_translate())
+    dbmt_result = dbmt_translate(hindi_sentence)
+    untranslated_count = dbmt_result['untranslated_words']
 
-    for word in words:
-        translated_word = translation_dict.get(word, None)
-        if translated_word is None:
-            untranslated_count += 1
-            translated_words.append(word)
-        else:
-            translated_words.append(translated_word)
-
-    if untranslated_count == 0:
-        result = ' '.join(translated_words)
-        print(f"✓ Dictionary-based translation: {result}")
-        return result, "Dictionary"
+    if dbmt_result['covered_fully']:
+        print(f"✓ Dictionary-based translation: {dbmt_result['translation']}")
+        return dbmt_result['translation'], "Dictionary"
 
     # 2. EBMT as fallback
     print(f"⚠️ Dictionary failed ({untranslated_count} words untranslated). Trying EBMT...")
@@ -814,20 +990,10 @@ def translate_both_modes(hindi_sentence: str) -> Dict:
     }
 
     # Dictionary coverage (informational; used to pick the recommended output)
-    words = hindi_sentence.split()
-    translated_words = []
-    untranslated = 0
-    for word in words:
-        tw = translation_dict.get(word)
-        if tw is None:
-            untranslated += 1
-            translated_words.append(word)
-        else:
-            translated_words.append(tw)
-
-    result['dictionary']['covered_fully'] = (untranslated == 0)
-    result['dictionary']['translation'] = ' '.join(translated_words)
-    result['dictionary']['untranslated_words'] = untranslated
+    dbmt_result = dbmt_translate(hindi_sentence)
+    result['dictionary']['covered_fully'] = dbmt_result['covered_fully']
+    result['dictionary']['translation'] = dbmt_result['translation']
+    result['dictionary']['untranslated_words'] = dbmt_result['untranslated_words']
 
     # Mode 1: EBMT
     ebmt_text, ebmt_score = ebmt_translate(hindi_sentence, parallel_corpus, jaccard_similarity)
