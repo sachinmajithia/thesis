@@ -181,8 +181,24 @@ class SentenceBasedSearcher:
             return []
 
         try:
-            # Tokenize into sentences
-            sentences = sent_tokenize(text)
+            # Devanagari/Gurmukhi text ends sentences with the danda ('।')
+            # or double danda ('॥'), not a period - nltk's Latin-punctuation
+            # sent_tokenize doesn't recognize either, so a whole multi-
+            # sentence Hindi/Punjabi paragraph collapses into a single
+            # "sentence". That turns every downstream Google query into one
+            # long, unfocused blob that almost never matches a real page.
+            # Split on the Indic sentence terminators first, then let
+            # sent_tokenize further split any residual Latin-punctuated text
+            # within each piece.
+            indic_sentence_end = re.compile(r'(?<=[।॥])\s*')
+            segments = [seg for seg in indic_sentence_end.split(text) if seg.strip()]
+
+            sentences = []
+            for segment in segments:
+                try:
+                    sentences.extend(sent_tokenize(segment))
+                except Exception:
+                    sentences.append(segment)
 
             # Filter sentences by minimum word count
             valid_sentences = [
