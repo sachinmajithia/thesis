@@ -1609,10 +1609,24 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
 
     # =========== STEP 3: INTERNET SEARCH (GOOGLE) WITH SENTENCE-BASED APPROACH ===========
-    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED FOR TRANSLATED CONTENT")
+    # Search with BOTH the original Hindi input and the translated Punjabi
+    # text (search_internet_bilingual), not just the translated Punjabi.
+    # The Dictionary->EBMT->NMT cascade produces a synthetic translation
+    # that rarely matches a real source's exact wording, so a Punjabi-only
+    # query misses sources that are actually published in Hindi (the input
+    # language itself) or whose Punjabi phrasing differs from our own
+    # translation. Searching the untranslated Hindi text as well catches
+    # those cases without depending on translation quality or on the
+    # source already being present in the local corpus.
+    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED, BILINGUAL (HINDI + PUNJABI)")
     print("-" * 80)
 
-    internet_matches = search_internet_google(translated_punjabi, max_results=30, use_sentence_search=use_sentence_search)
+    internet_matches = search_internet_bilingual(
+        hindi_text,
+        translated_punjabi,
+        max_results=30,
+        use_sentence_search=use_sentence_search
+    )
 
     #=========== PREPARE RESPONSE ===========
     processing_time = (datetime.now() - start_time).total_seconds()
@@ -1638,7 +1652,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'total_matches': len(internet_matches),
             'matches': internet_matches[:40],
             'max_similarity': max([m['similarity'] for m in internet_matches], default=0),
-            'search_method': 'sentence-based' if use_sentence_search else 'keyword-based'
+            'search_method': 'bilingual-sentence-based' if use_sentence_search else 'bilingual-keyword-based'
         },
 
         # Summary
@@ -1680,7 +1694,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             response_data['plagiarism_summary']['highest_internet_similarity'],
             processing_time,
             json.dumps(response_data),
-            'sentence-based' if use_sentence_search else 'keyword-based'))
+            'bilingual-sentence-based' if use_sentence_search else 'bilingual-keyword-based'))
 
         conn.commit()
         conn.close()
