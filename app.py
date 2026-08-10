@@ -20,7 +20,6 @@ from typing import List, Dict, Tuple, Optional
 from werkzeug.utils import secure_filename
 import traceback
 import requests
-from urllib.parse import quote
 import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
 
@@ -1478,61 +1477,18 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
             print(f"   Set with: setx SERPAPI_KEY \"your_key\"  (Windows)")
             print(f"   Set with: export SERPAPI_KEY=\"your_key\"  (macOS/Linux)")
 
-        # ===== METHOD 3: FALLBACK TO SIMULATION =====
-        print(f"\n📝 All real APIs unavailable - using simulated results")
-        print(f"   (This is FAKE data for testing)")
-
-        simulated_results = [
-            {
-                'url': f'https://example-site-1.com/search?q={quote(query)}&hl=en',
-                'title': f'Search Results for: {query}',
-                'snippet': f'Find information and resources about {query}.',
-                'similarity': 0.82,
-                'search_method': 'simulated'
-            },
-            {
-                'url': f'https://wiki-example.com/{quote(query)}',
-                'title': f'{query} - Reference',
-                'snippet': f'Comprehensive information about {query}.',
-                'similarity': 0.76,
-                'search_method': 'simulated'
-            },
-            {
-                'url': f'https://www.quora.com/search?q={quote(query)}',
-                'title': f'Q&A: {query}',
-                'snippet': f'Questions and answers related to {query}.',
-                'similarity': 0.68,
-                'search_method': 'simulated'
-            },
-            {
-                'url': f'https://blog-example.com/{quote(query)}',
-                'title': f'Blog: {query}',
-                'snippet': f'In-depth analysis about {query}.',
-                'similarity': 0.61,
-                'search_method': 'simulated'
-            },
-            {
-                'url': f'https://news-example.com/topic/{quote(query)}',
-                'title': f'News: {query}',
-                'snippet': f'Latest news about {query}.',
-                'similarity': 0.55,
-                'search_method': 'simulated'
-            }
-        ]
-
-        for result in simulated_results[:max_results]:
-            match = {
-                'source': 'internet',
-                'url': result['url'],
-                'title': result['title'],
-                'similarity': result['similarity'],
-                'snippet': result['snippet'],
-                'search_method': result['search_method']
-            }
-            matches.append(match)
-
-        print(f"✅ Generated {len(matches)} SIMULATED results (not real)")
-        return matches
+        # ===== NO REAL SEARCH API AVAILABLE =====
+        # Previously this fell back to fabricated "simulated" results
+        # (fake urls like example-site-1.com with snippets that just echo
+        # the query back). For a plagiarism-detection tool, presenting
+        # fabricated matches as if they were real search results is worse
+        # than showing nothing - a 403/quota/config failure here should
+        # surface as "internet search unavailable", never as fake evidence
+        # of a match (or non-match). Return no matches and let the caller's
+        # own error handling/logging make the failure visible instead.
+        print(f"\n❌ No real search API available or all real API calls failed for this query - "
+              f"returning no internet matches (not fabricating fake results)")
+        return []
 
     except Exception as e:
         print(f"\n❌ UNEXPECTED ERROR: {type(e).__name__}: {e}")
