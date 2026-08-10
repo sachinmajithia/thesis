@@ -420,14 +420,19 @@ function renderPlagiarismResult(data) {
   }
   html += `</div>`;
 
-  const corpusMatchedInternet = internet.corpus_matched_results || {matches: [], total_matches: 0};
+  const internetResults = internet.matches || [];
+  const internetSourceHints = {
+    corpus_match: "Searched using the top corpus match's own text, since it may itself be sourced from a website - more likely to be a verbatim web hit than our own translation.",
+    translated_text: 'No corpus match qualified, so searched using the translated Punjabi text instead.',
+    none: 'No corpus match and no translation available to search with.'
+  };
 
-  html += `<div class="card"><h2>Internet Matches (${corpusMatchedInternet.total_matches})</h2>`;
-  html += `<p class="hint">Searched using the top corpus match's own text, since it may itself be sourced from a website - more likely to be a verbatim web hit than our own translation.</p>`;
-  if (corpusMatchedInternet.matches && corpusMatchedInternet.matches.length) {
-    html += corpusMatchedInternet.matches.slice(0, 5).map(renderInternetMatch).join('');
+  html += `<div class="card"><h2>Internet Matches (${internet.total_matches || 0})</h2>`;
+  html += `<p class="hint">${escapeHtml(internetSourceHints[internet.source] || internetSourceHints.none)}</p>`;
+  if (internetResults.length) {
+    html += internetResults.slice(0, 5).map(renderInternetMatch).join('');
   } else {
-    html += `<div class="empty-state">No corpus match to search with, or no internet matches found for it.</div>`;
+    html += `<div class="empty-state">No internet matches found.</div>`;
   }
   html += `</div>`;
 

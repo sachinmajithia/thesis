@@ -1818,14 +1818,19 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
 
     corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
 
-    # =========== STEP 3: INTERNET SEARCH (GOOGLE) - CORPUS-MATCHED TEXT ONLY ===========
-    # Only search the internet when the corpus already found a strong (>50%)
-    # semantic match, and always search with THAT document's own text rather
-    # than the raw Hindi input or our own translation - a corpus document is
-    # often itself sourced from a website, so its real wording is far more
-    # likely to be a verbatim (or near-verbatim) hit online.
+    # =========== STEP 3: INTERNET SEARCH (GOOGLE) ===========
+    # Prefer searching with the top corpus match's own text when it's a
+    # strong (>50%) match - a corpus document is often itself sourced from a
+    # website, so its real wording is far more likely to be a verbatim (or
+    # near-verbatim) hit online than our own translation. If no corpus match
+    # qualifies (e.g. EBMT fails and NMT's translation doesn't resemble
+    # anything already in the corpus), fall back to searching with the
+    # translated Punjabi text directly, so internet search still runs
+    # instead of silently finding nothing whenever EBMT doesn't succeed.
     CORPUS_MATCH_INTERNET_THRESHOLD = 0.5
-    corpus_matched_internet_matches = []
+    internet_matches = []
+    internet_search_source = 'none'
+
     if corpus_matches and corpus_matches[0]['similarity'] > CORPUS_MATCH_INTERNET_THRESHOLD:
         print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - CORPUS-MATCHED TEXT (>50% SIMILARITY)")
         print("-" * 80)
@@ -1837,14 +1842,26 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
         if corpus_query_text.endswith('...'):
             corpus_query_text = corpus_query_text[:-3]
 
-        corpus_matched_internet_matches = search_internet_google(
+        internet_matches = search_internet_google(
             corpus_query_text,
             max_results=5,
             use_sentence_search=use_sentence_search
         )
+        internet_search_source = 'corpus_match'
 
-    total_internet_matches = len(corpus_matched_internet_matches)
-    highest_internet_similarity = max([m['similarity'] for m in corpus_matched_internet_matches], default=0)
+    elif translated_punjabi and translated_punjabi.strip():
+        print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - TRANSLATED TEXT (NO QUALIFYING CORPUS MATCH)")
+        print("-" * 80)
+
+        internet_matches = search_internet_google(
+            translated_punjabi,
+            max_results=5,
+            use_sentence_search=use_sentence_search
+        )
+        internet_search_source = 'translated_text'
+
+    total_internet_matches = len(internet_matches)
+    highest_internet_similarity = max([m['similarity'] for m in internet_matches], default=0)
 
     #=========== PREPARE RESPONSE ===========
     processing_time = (datetime.now() - start_time).total_seconds()
@@ -1865,16 +1882,15 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'max_similarity': max([m['similarity'] for m in corpus_matches], default=0)
         },
 
-        # Internet Results - only ever searched using the top corpus match's
-        # own text (when corpus similarity is >50%). 'matches' is also kept
-        # as a flat list for callers that expect that shape.
+        # Internet Results - searched with the top corpus match's own text
+        # when one qualifies (>50%), otherwise with the translated Punjabi
+        # text so internet search still runs even when EBMT fails and NMT's
+        # output doesn't resemble anything in the corpus. 'source' records
+        # which one was actually used: 'corpus_match', 'translated_text', or
+        # 'none' (no corpus match and no translation to fall back to).
         'internet_results': {
-            'matches': corpus_matched_internet_matches,
-            'corpus_matched_results': {
-                'total_matches': len(corpus_matched_internet_matches),
-                'matches': corpus_matched_internet_matches[:5],
-                'max_similarity': highest_internet_similarity
-            },
+            'matches': internet_matches[:5],
+            'source': internet_search_source,
             'total_matches': total_internet_matches,
             'max_similarity': highest_internet_similarity,
             'search_method': 'whole-paragraph+english-gloss' if use_sentence_search else 'whole-paragraph'
