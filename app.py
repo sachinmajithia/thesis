@@ -882,6 +882,52 @@ def translate_both_modes(hindi_sentence: str) -> Dict:
 
     return result
 
+def google_translate_hindi_to_punjabi(hindi_text: str) -> str:
+    """
+    Translate Hindi text to Punjabi using the Google Cloud Translation API -
+    not our own NLLB model - so the internet-search query for criterion 1 is
+    Google's own translation. Requires a Google API key with the Cloud
+    Translation API enabled: GOOGLE_TRANSLATE_API_KEY, falling back to the
+    same GOOGLE_API_KEY used for Custom Search if that project also has
+    Translation enabled.
+
+    Returns "" on any failure (missing key, quota, network error) so the
+    caller can fall back to the NLLB-based translation.
+    """
+    if not hindi_text or not hindi_text.strip():
+        return ""
+
+    api_key = os.getenv('GOOGLE_TRANSLATE_API_KEY') or os.getenv('GOOGLE_API_KEY')
+    if not api_key:
+        print("⚠️ GOOGLE_TRANSLATE_API_KEY / GOOGLE_API_KEY not set - cannot use Google Translate")
+        return ""
+
+    try:
+        response = requests.post(
+            "https://translation.googleapis.com/language/translate/v2",
+            params={'key': api_key},
+            data={'q': hindi_text, 'source': 'hi', 'target': 'pa', 'format': 'text'},
+            timeout=15
+        )
+
+        if response.status_code == 200:
+            translated = response.json()['data']['translations'][0]['translatedText']
+            print(f"✅ Google Translate (Hindi→Punjabi): {translated}")
+            return translated
+
+        print(f"❌ Google Translate API error {response.status_code}: {response.text[:200]}")
+        return ""
+
+    except requests.exceptions.Timeout:
+        print("❌ Google Translate API timeout")
+        return ""
+    except requests.exceptions.ConnectionError:
+        print("❌ Google Translate API connection error")
+        return ""
+    except Exception as e:
+        print(f"❌ Google Translate API exception: {e}")
+        return ""
+
 # ============================================================================
 # 4. PLAGIARISM DETECTION FUNCTIONS
 # ============================================================================
@@ -1558,8 +1604,8 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     """
     Core plagiarism-check pipeline shared by the text-input and
     document-upload endpoints: translate (both EBMT and NMT modes) → corpus
-    matching → internet search (on the translated Punjabi text, plus on any
-    corpus-matched document's own text) → summary → DB logging.
+    matching → internet search (on the Google-translated Punjabi text, plus
+    on any corpus-matched document's own text) → summary → DB logging.
     """
     print("\n" + "=" * 80)
     print("PLAGIARISM CHECK STARTED")
@@ -1592,14 +1638,19 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     corpus_candidates = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=CORPUS_CANDIDATE_THRESHOLD)
     corpus_matches = [m for m in corpus_candidates if m['similarity'] >= CORPUS_DISPLAY_THRESHOLD]
 
-    # =========== STEP 3: INTERNET SEARCH (GOOGLE) ON TRANSLATED PUNJABI TEXT ===========
-    # Search criterion 1: the Hindi input is translated to Punjabi (STEP 1
-    # above), and that translated Punjabi text is searched on the internet
-    # as a whole-text query.
-    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - TRANSLATED PUNJABI TEXT")
+    # =========== STEP 3: INTERNET SEARCH (GOOGLE) ON GOOGLE-TRANSLATED PUNJABI TEXT ===========
+    # Search criterion 1: the Hindi input is translated to Punjabi via the
+    # Google Cloud Translation API (not our own NLLB model), and that
+    # translation is searched on the internet as a whole-text query. Falls
+    # back to the NLLB-based translation (STEP 1) if Google Translate is
+    # unavailable (no API key, quota, network error).
+    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - GOOGLE-TRANSLATED PUNJABI TEXT")
     print("-" * 80)
 
-    internet_matches = search_internet_google(translated_punjabi, max_results=30)
+    google_translated_punjabi = google_translate_hindi_to_punjabi(hindi_text)
+    search_query_text = google_translated_punjabi or translated_punjabi
+
+    internet_matches = search_internet_google(search_query_text, max_results=30)
     seen_urls = {m['url'] for m in internet_matches if m.get('url')}
 
     # =========== STEP 3b: INTERNET SEARCH (GOOGLE) ON CORPUS-MATCHED TEXT ===========
@@ -1636,6 +1687,12 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
         'translated_punjabi': translated_punjabi,
         'translation_method': translation_method,
 
+        # Google Cloud Translation API output (Hindi -> Punjabi), used as
+        # the internet-search query for criterion 1 instead of the
+        # NLLB-based translation above. Empty if Google Translate was
+        # unavailable, in which case the NLLB translation was used instead.
+        'google_translated_punjabi': google_translated_punjabi,
+
         # Both translation modes (EBMT + NMT), shown side-by-side so the
         # final output is not limited to a single cascade winner.
         'translation_modes': both_modes,
@@ -1653,9 +1710,10 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'matches': internet_matches[:40],
             'max_similarity': max([m['similarity'] for m in internet_matches], default=0),
             'search_method': (
-                'translated-punjabi-text+corpus-matched-text'
-                if corpus_candidates and corpus_candidates[0]['similarity'] > CORPUS_CANDIDATE_THRESHOLD
-                else 'translated-punjabi-text'
+                ('google-translated-punjabi-text' if google_translated_punjabi else 'nllb-translated-punjabi-text')
+                + ('+corpus-matched-text'
+                   if corpus_candidates and corpus_candidates[0]['similarity'] > CORPUS_CANDIDATE_THRESHOLD
+                   else '')
             )
         },
 
