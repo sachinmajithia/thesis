@@ -1558,8 +1558,8 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     """
     Core plagiarism-check pipeline shared by the text-input and
     document-upload endpoints: translate (both EBMT and NMT modes) → corpus
-    matching → internet search on the translated Punjabi text → summary →
-    DB logging.
+    matching → internet search (on the translated Punjabi text, plus on any
+    corpus-matched document's own text) → summary → DB logging.
     """
     print("\n" + "=" * 80)
     print("PLAGIARISM CHECK STARTED")
@@ -1579,16 +1579,54 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     print("\n[STEP 2] CROSS-LANGUAGE PLAGIARISM CHECK - CORPUS")
     print("-" * 80)
 
-    corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
+    # Search at a lower threshold than what we treat as a "confirmed" match.
+    # Our own translation rarely reproduces a source document's exact
+    # original wording, so a genuine corpus source can score below the
+    # confirmed-match bar on semantic similarity alone - but its real
+    # (verbatim) text is still a far better internet-search query than our
+    # own translation, which is exactly why STEP 3b below uses it once a
+    # looser candidate threshold is cleared, even if it doesn't clear the
+    # stricter bar used to decide what counts as a shown corpus match.
+    CORPUS_DISPLAY_THRESHOLD = 0.55
+    CORPUS_CANDIDATE_THRESHOLD = 0.4
+    corpus_candidates = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=CORPUS_CANDIDATE_THRESHOLD)
+    corpus_matches = [m for m in corpus_candidates if m['similarity'] >= CORPUS_DISPLAY_THRESHOLD]
 
     # =========== STEP 3: INTERNET SEARCH (GOOGLE) ON TRANSLATED PUNJABI TEXT ===========
-    # Single search criterion: the Hindi input is translated to Punjabi
-    # (STEP 1 above), and that translated Punjabi text is searched on the
-    # internet as a whole-text query.
+    # Search criterion 1: the Hindi input is translated to Punjabi (STEP 1
+    # above), and that translated Punjabi text is searched on the internet
+    # as a whole-text query.
     print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - TRANSLATED PUNJABI TEXT")
     print("-" * 80)
 
     internet_matches = search_internet_google(translated_punjabi, max_results=30)
+    seen_urls = {m['url'] for m in internet_matches if m.get('url')}
+
+    # =========== STEP 3b: INTERNET SEARCH (GOOGLE) ON CORPUS-MATCHED TEXT ===========
+    # Search criterion 2 - only when the corpus already found a candidate
+    # match: search using THAT corpus document's own verbatim text. A
+    # corpus document is itself sourced from a website, so its real wording
+    # is a far more reliable internet query than our own translation.
+    if corpus_candidates and corpus_candidates[0]['similarity'] > CORPUS_CANDIDATE_THRESHOLD:
+        top_corpus_match = corpus_candidates[0]
+        print(f"\n[STEP 3b] INTERNET SEARCH (GOOGLE) - CORPUS-MATCHED TEXT "
+              f"(similarity {top_corpus_match['similarity']:.2f})")
+        print("-" * 80)
+
+        # content_preview may end with a literal "..." truncation marker -
+        # strip it so it isn't sent as part of the search query.
+        corpus_query_text = top_corpus_match['content_preview']
+        if corpus_query_text.endswith('...'):
+            corpus_query_text = corpus_query_text[:-3]
+
+        corpus_matched_internet_matches = search_internet_google(corpus_query_text, max_results=10)
+        for m in corpus_matched_internet_matches:
+            url = m.get('url')
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                internet_matches.append(m)
+
+        internet_matches.sort(key=lambda m: m.get('similarity', 0), reverse=True)
 
     #=========== PREPARE RESPONSE ===========
     processing_time = (datetime.now() - start_time).total_seconds()
@@ -1614,7 +1652,11 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'total_matches': len(internet_matches),
             'matches': internet_matches[:40],
             'max_similarity': max([m['similarity'] for m in internet_matches], default=0),
-            'search_method': 'translated-punjabi-text'
+            'search_method': (
+                'translated-punjabi-text+corpus-matched-text'
+                if corpus_candidates and corpus_candidates[0]['similarity'] > CORPUS_CANDIDATE_THRESHOLD
+                else 'translated-punjabi-text'
+            )
         },
 
         # Summary
@@ -1656,7 +1698,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             response_data['plagiarism_summary']['highest_internet_similarity'],
             processing_time,
             json.dumps(response_data),
-            'translated-punjabi-text'))
+            response_data['internet_results']['search_method']))
 
         conn.commit()
         conn.close()
