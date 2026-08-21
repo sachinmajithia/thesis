@@ -750,6 +750,39 @@ def nmt_translate(hindi_sentence, tokenizer, model, device):
     except Exception as e:
         return f"NMT Error: {str(e)}", -1.0
 
+def translate_to_english(text: str) -> str:
+    """
+    Translate Hindi/Punjabi text to English via NLLB, so internet search can
+    also query in English - most open-web plagiarism sources are indexed in
+    English, so a same-script search alone misses them regardless of query
+    quality, and an English gloss is far more robust to translation-wording
+    mismatches than trying to reproduce the exact source script.
+    """
+    if not text or not text.strip() or not model_cache.get('loaded'):
+        return ""
+
+    try:
+        tokenizer = model_cache['tokenizer']
+        model = model_cache['model']
+        device = model_cache['device']
+        target_lang = "eng_Latn"
+
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            generated_tokens = model.generate(
+                **inputs,
+                forced_bos_token_id=tokenizer.convert_tokens_to_ids(target_lang),
+                max_length=512
+            )
+
+        return tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+
+    except Exception as e:
+        print(f"⚠️ English translation for search failed: {e}")
+        return ""
+
 def translate_hindi_to_punjabi(hindi_sentence):
     """Main translation function with cascade approach: Dictionary -> EBMT -> NMT"""
     print(f"\n🔄 Translating Hindi to Punjabi: '{hindi_sentence}'")
@@ -1099,39 +1132,77 @@ class EnhancedCorpusManager:
             return []
 
 # ============================================================================
-# 5. ENHANCED INTERNET SEARCH WITH SENTENCE-BASED APPROACH
+# 5. ENHANCED INTERNET SEARCH - WHOLE-PARAGRAPH + ENGLISH-GLOSS APPROACH
 # ============================================================================
 
-def search_internet_google(query: str, max_results: int = 30, use_sentence_search: bool = True) -> List[Dict]:
+def search_internet_google(
+    query: str,
+    max_results: int = 30,
+    use_sentence_search: bool = True,
+    include_english_gloss: bool = True
+) -> List[Dict]:
     """
-    Search Google for similar content using sentence-based approach
+    Search Google for similar content, searching the whole input paragraph
+    as a single query - not split into per-sentence queries - so paragraph-
+    level context and word order are preserved. Also issues a quoted
+    exact-phrase query so verbatim copies are retrieved, and (since neither
+    the Hindi input nor our own EBMT/NMT retranslation is ever verbatim to
+    a real source that only exists in a third language/wording) an English
+    gloss query, so a source can still be found through Google's own
+    relevance ranking even when none of our queries are an exact match for
+    it - genuine matches are then identified by semantic re-ranking
+    (_apply_semantic_similarity), not by requiring an exact phrase hit.
 
     Args:
-        query: Input text to search (usually translated Punjabi)
+        query: Input paragraph to search (usually translated Punjabi)
         max_results: Maximum number of results
-        use_sentence_search: If True, use sentence-based search instead of keyword-level
+        use_sentence_search: If True, also search with an English gloss of
+            the paragraph (name kept for API/UI compatibility)
+        include_english_gloss: Secondary gate on the English-gloss search
 
     Returns:
         List of search results with similarity scores
     """
     try:
         print(f"\n🌐 Searching Google for similar content...")
-        print(f"📝 Search strategy: {'SENTENCE-BASED' if use_sentence_search else 'KEYWORD-BASED'}")
 
-        # Extract sentences if enabled
-        search_queries = [query]  # Default: use whole query
+        # Google's relevance quality degrades sharply on very long queries
+        # (e.g. a whole uploaded document), so cap each query to roughly one
+        # paragraph's worth of text.
+        MAX_QUERY_CHARS = 300
+        clean_query = query.strip()[:MAX_QUERY_CHARS]
 
-        if use_sentence_search and model_cache.get('sentence_searcher'):
-            sentence_searcher = model_cache['sentence_searcher']
-            search_queries = sentence_searcher.create_sentence_queries(query, num_queries=5)
+        # An unquoted query lets Google match on term overlap/relevance, so a
+        # page that is a genuine match (but not word-for-word, since our
+        # query is itself a translation) can still be found. A quoted
+        # exact-phrase query additionally catches true word-for-word copies.
+        # Kept short (not the full paragraph) since a very long quoted
+        # phrase breaks on the smallest formatting difference.
+        EXACT_PHRASE_CHARS = 120
+        exact_phrase_query = f'"{clean_query[:EXACT_PHRASE_CHARS]}"'
+
+        search_queries = [exact_phrase_query, clean_query]
+        strategy = 'EXACT-PHRASE+WHOLE-PARAGRAPH'
+
+        if use_sentence_search and include_english_gloss and model_cache.get('loaded'):
+            english_gloss = translate_to_english(clean_query).strip()
+            if english_gloss and english_gloss.lower() != clean_query.lower():
+                search_queries.append(english_gloss[:MAX_QUERY_CHARS])
+                strategy += '+ENGLISH-GLOSS'
+
+        print(f"📝 Search strategy: {strategy}")
 
         all_matches = []
         seen_urls = set()
 
-        # Perform searches for each sentence
+        # Perform search for each query (exact phrase, whole paragraph, plus
+        # English gloss). Always ask Google for a full page of results per
+        # query (its own per-call max) rather than splitting max_results
+        # across queries, so the real source has the best chance of being
+        # in what we fetch before we rank/trim down to max_results.
         for i, search_query in enumerate(search_queries, 1):
             print(f"\n📌 Searching with Query {i}/{len(search_queries)}: '{search_query[:80]}...'")
-            matches = _perform_google_search(search_query, max_results // len(search_queries) + 2)
+            matches = _perform_google_search(search_query, 10)
 
             for match in matches:
                 url = match['url']
@@ -1205,6 +1276,35 @@ def search_internet_bilingual(
     print(f"\n✅ Bilingual internet search complete: {len(all_matches)} unique results")
     return all_matches[:max_results]
 
+def _apply_semantic_similarity(query: str, matches: List[Dict]) -> List[Dict]:
+    """
+    Replace the rank-based similarity heuristic with a real semantic score:
+    cosine similarity between the query and each result's title+snippet,
+    using the same IndicSBERT model already used for corpus matching. This
+    is what lets a genuine cross-language/cross-wording match be recognized
+    even when it isn't a verbatim/exact-phrase hit - relevance is judged by
+    meaning rather than by Google's result position or an exact-phrase
+    requirement. Falls back to the existing rank-based score if the model
+    isn't loaded.
+    """
+    semantic_model = model_cache.get('semantic_model')
+    if not semantic_model or not matches:
+        return matches
+
+    try:
+        texts = [f"{m.get('title', '')}. {m.get('snippet', '')}".strip() for m in matches]
+        embeddings = semantic_model.encode([query] + texts, normalize_embeddings=True)
+        query_embedding, result_embeddings = embeddings[0], embeddings[1:]
+        similarities = np.dot(result_embeddings, query_embedding)
+
+        for match, similarity in zip(matches, similarities):
+            match['similarity'] = float(similarity)
+            match['similarity_type'] = 'semantic'
+    except Exception as e:
+        print(f"⚠️ Semantic re-ranking failed, keeping rank-based similarity: {e}")
+
+    return matches
+
 def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
     """
     Perform actual Google search for a single query
@@ -1270,7 +1370,8 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                         }
                         matches.append(match)
 
-                    print(f"✅ Returning {len(matches)} Google API results")
+                    matches = _apply_semantic_similarity(query, matches)
+                    print(f"✅ Returning {len(matches)} Google API results (semantically re-ranked)")
 
                     return matches
 
@@ -1351,7 +1452,8 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                         }
                         matches.append(match)
 
-                    print(f"✅ Returning {len(matches)} SerpAPI results")
+                    matches = _apply_semantic_similarity(query, matches)
+                    print(f"✅ Returning {len(matches)} SerpAPI results (semantically re-ranked)")
                     return matches
 
                 elif response.status_code == 403:
@@ -1586,7 +1688,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     """
     Core plagiarism-check pipeline shared by the text-input and
     document-upload endpoints: translate (both EBMT and NMT modes) → corpus
-    matching → sentence-based internet search → summary + DB logging.
+    matching → bilingual (Hindi + Punjabi) internet search → summary → DB logging.
     """
     print("\n" + "=" * 80)
     print("PLAGIARISM CHECK STARTED")
@@ -1648,7 +1750,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'total_matches': len(internet_matches),
             'matches': internet_matches[:40],
             'max_similarity': max([m['similarity'] for m in internet_matches], default=0),
-            'search_method': 'sentence-based' if use_sentence_search else 'keyword-based'
+            'search_method': 'whole-paragraph+english-gloss' if use_sentence_search else 'whole-paragraph'
         },
 
         # Summary
@@ -1690,7 +1792,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             response_data['plagiarism_summary']['highest_internet_similarity'],
             processing_time,
             json.dumps(response_data),
-            'sentence-based' if use_sentence_search else 'keyword-based'))
+            'whole-paragraph+english-gloss' if use_sentence_search else 'whole-paragraph'))
 
         conn.commit()
         conn.close()
