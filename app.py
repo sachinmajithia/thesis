@@ -979,6 +979,27 @@ def find_verbatim_ebmt_lines(
             matches.append((sentence, best_punjabi, best_similarity))
     return matches
 
+def detect_script_lang_code(text: str, default: str = 'hin_Deva') -> str:
+    """
+    Pick the NLLB source-language code ('hin_Deva' or 'pan_Guru') for a
+    piece of Hindi/Punjabi text by Unicode script. NLLB's tokenizer defaults
+    src_lang to 'eng_Latn' unless set explicitly before encoding - since
+    nmt_translate() and translate_to_english() never set it, every NMT call
+    was silently telling the model its Hindi/Punjabi input was English
+    text, degrading translation quality across the board (including the
+    NMT fallback that's the ONLY translation available whenever EBMT can't
+    confidently match any line of the input - see find_verbatim_ebmt_lines).
+    """
+    if not text:
+        return default
+    hindi_chars = sum(1 for c in text if 'ऀ' <= c <= 'ॿ')
+    punjabi_chars = sum(1 for c in text if '਀' <= c <= '੿')
+    if punjabi_chars > hindi_chars:
+        return 'pan_Guru'
+    if hindi_chars > 0:
+        return 'hin_Deva'
+    return default
+
 def nmt_translate(hindi_sentence, tokenizer, model, device):
     """Neural Machine Translation using NLLB-200"""
     if model is None or tokenizer is None:
@@ -986,6 +1007,7 @@ def nmt_translate(hindi_sentence, tokenizer, model, device):
 
     try:
         target_lang = "pan_Guru"
+        tokenizer.src_lang = detect_script_lang_code(hindi_sentence, default='hin_Deva')
         inputs = tokenizer(hindi_sentence, return_tensors="pt", truncation=True, padding=True)
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
@@ -1017,6 +1039,7 @@ def translate_to_english(text: str) -> str:
         device = model_cache['device']
         target_lang = "eng_Latn"
 
+        tokenizer.src_lang = detect_script_lang_code(text, default='hin_Deva')
         inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
@@ -1970,18 +1993,26 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     corpus_candidates = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.4)
     corpus_matches = [m for m in corpus_candidates if m['similarity'] >= CORPUS_DISPLAY_THRESHOLD]
 
-    # =========== STEP 3: INTERNET SEARCH (GOOGLE) - ALWAYS ON THE TRANSLATION ===========
-    # Always search the internet using our own translated Punjabi text, not
-    # only when the corpus already contains a similar document. Gating the
-    # internet search behind a corpus match meant a plagiarized document
-    # could only ever be found online if the original source had already
-    # been manually added to the local corpus first - which defeats the
-    # purpose of internet-based detection (the whole point is to catch
-    # copies of content that was never in the corpus to begin with).
-    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - TRANSLATED CONTENT")
+    # =========== STEP 3: INTERNET SEARCH (GOOGLE) - ALWAYS, HINDI + PUNJABI IN PARALLEL ===========
+    # Always search the internet - not only when the corpus already contains
+    # a similar document. Gating the internet search behind a corpus match
+    # meant a plagiarized document could only ever be found online if the
+    # original source had already been manually added to the local corpus
+    # first - which defeats the purpose of internet-based detection (the
+    # whole point is to catch copies of content that was never in the
+    # corpus to begin with). This holds even when EBMT can't confidently
+    # match any line of the input (see find_verbatim_ebmt_lines) and the
+    # cascade falls all the way back to NMT: search_internet_bilingual
+    # queries with BOTH the original Hindi text and our translated Punjabi
+    # in parallel, so a weak/paraphrased NMT translation isn't the only
+    # shot at finding the source - the untranslated Hindi input (itself
+    # usually a Google-translated rendering of that same source) is
+    # searched too.
+    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - ORIGINAL HINDI + TRANSLATED PUNJABI")
     print("-" * 80)
 
-    internet_matches = search_internet_google(
+    internet_matches = search_internet_bilingual(
+        hindi_text,
         translated_punjabi,
         max_results=15,
         use_sentence_search=use_sentence_search
@@ -2097,7 +2128,8 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'verbatim_ebmt_line_matches': len(verbatim_lines),
             'total_matches': total_internet_matches,
             'max_similarity': highest_internet_similarity,
-            'search_method': 'whole-paragraph+english-gloss' if use_sentence_search else 'whole-paragraph'
+            'search_method': 'bilingual(hindi+punjabi)-whole-paragraph+english-gloss' if use_sentence_search
+                else 'bilingual(hindi+punjabi)-whole-paragraph'
         },
 
         # Summary
@@ -2139,7 +2171,8 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             response_data['plagiarism_summary']['highest_internet_similarity'],
             processing_time,
             json.dumps(response_data),
-            'whole-paragraph+english-gloss' if use_sentence_search else 'whole-paragraph'))
+            'bilingual(hindi+punjabi)-whole-paragraph+english-gloss' if use_sentence_search
+                else 'bilingual(hindi+punjabi)-whole-paragraph'))
 
         conn.commit()
         conn.close()
