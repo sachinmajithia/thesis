@@ -750,39 +750,6 @@ def nmt_translate(hindi_sentence, tokenizer, model, device):
     except Exception as e:
         return f"NMT Error: {str(e)}", -1.0
 
-def translate_to_english(text: str) -> str:
-    """
-    Translate Hindi/Punjabi text to English via NLLB, so internet search can
-    also query in English - most open-web plagiarism sources are indexed in
-    English, so a same-script search alone misses them regardless of query
-    quality, and an English gloss is far more robust to translation-wording
-    mismatches than trying to reproduce the exact source script.
-    """
-    if not text or not text.strip() or not model_cache.get('loaded'):
-        return ""
-
-    try:
-        tokenizer = model_cache['tokenizer']
-        model = model_cache['model']
-        device = model_cache['device']
-        target_lang = "eng_Latn"
-
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            generated_tokens = model.generate(
-                **inputs,
-                forced_bos_token_id=tokenizer.convert_tokens_to_ids(target_lang),
-                max_length=512
-            )
-
-        return tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
-
-    except Exception as e:
-        print(f"⚠️ English translation for search failed: {e}")
-        return ""
-
 def translate_hindi_to_punjabi(hindi_sentence):
     """Main translation function with cascade approach: Dictionary -> EBMT -> NMT"""
     print(f"\n🔄 Translating Hindi to Punjabi: '{hindi_sentence}'")
@@ -1132,33 +1099,24 @@ class EnhancedCorpusManager:
             return []
 
 # ============================================================================
-# 5. ENHANCED INTERNET SEARCH - WHOLE-PARAGRAPH + ENGLISH-GLOSS APPROACH
+# 5. INTERNET SEARCH - SINGLE CRITERION: TRANSLATED PUNJABI TEXT
 # ============================================================================
+#
+# Exactly one search criterion: the Hindi input is translated to Punjabi
+# (see translate_both_modes/translate_hindi_to_punjabi), and that translated
+# Punjabi text is searched on the internet as a single whole-text query.
+# Earlier attempts at additional criteria (searching the original Hindi text
+# too, an exact-phrase quoted query, an English-gloss query, per-sentence
+# splitting) did not reliably work and have been removed.
 
-def search_internet_google(
-    query: str,
-    max_results: int = 30,
-    use_sentence_search: bool = True,
-    include_english_gloss: bool = True
-) -> List[Dict]:
+def search_internet_google(query: str, max_results: int = 30) -> List[Dict]:
     """
-    Search Google for similar content, searching the whole input paragraph
-    as a single query - not split into per-sentence queries - so paragraph-
-    level context and word order are preserved. Also issues a quoted
-    exact-phrase query so verbatim copies are retrieved, and (since neither
-    the Hindi input nor our own EBMT/NMT retranslation is ever verbatim to
-    a real source that only exists in a third language/wording) an English
-    gloss query, so a source can still be found through Google's own
-    relevance ranking even when none of our queries are an exact match for
-    it - genuine matches are then identified by semantic re-ranking
-    (_apply_semantic_similarity), not by requiring an exact phrase hit.
+    Search Google for content similar to the translated Punjabi text, using
+    the whole text as a single query.
 
     Args:
-        query: Input paragraph to search (usually translated Punjabi)
+        query: Translated Punjabi text to search
         max_results: Maximum number of results
-        use_sentence_search: If True, also search with an English gloss of
-            the paragraph (name kept for API/UI compatibility)
-        include_english_gloss: Secondary gate on the English-gloss search
 
     Returns:
         List of search results with similarity scores
@@ -1167,114 +1125,26 @@ def search_internet_google(
         print(f"\n🌐 Searching Google for similar content...")
 
         # Google's relevance quality degrades sharply on very long queries
-        # (e.g. a whole uploaded document), so cap each query to roughly one
+        # (e.g. a whole uploaded document), so cap the query to roughly one
         # paragraph's worth of text.
         MAX_QUERY_CHARS = 300
         clean_query = query.strip()[:MAX_QUERY_CHARS]
 
-        # An unquoted query lets Google match on term overlap/relevance, so a
-        # page that is a genuine match (but not word-for-word, since our
-        # query is itself a translation) can still be found. A quoted
-        # exact-phrase query additionally catches true word-for-word copies.
-        # Kept short (not the full paragraph) since a very long quoted
-        # phrase breaks on the smallest formatting difference.
-        EXACT_PHRASE_CHARS = 120
-        exact_phrase_query = f'"{clean_query[:EXACT_PHRASE_CHARS]}"'
+        if not clean_query:
+            return []
 
-        search_queries = [exact_phrase_query, clean_query]
-        strategy = 'EXACT-PHRASE+WHOLE-PARAGRAPH'
+        print(f"📌 Query: '{clean_query[:80]}...'")
+        matches = _perform_google_search(clean_query, max_results)
 
-        if use_sentence_search and include_english_gloss and model_cache.get('loaded'):
-            english_gloss = translate_to_english(clean_query).strip()
-            if english_gloss and english_gloss.lower() != clean_query.lower():
-                search_queries.append(english_gloss[:MAX_QUERY_CHARS])
-                strategy += '+ENGLISH-GLOSS'
+        matches.sort(key=lambda x: x['similarity'], reverse=True)
 
-        print(f"📝 Search strategy: {strategy}")
-
-        all_matches = []
-        seen_urls = set()
-
-        # Perform search for each query (exact phrase, whole paragraph, plus
-        # English gloss). Always ask Google for a full page of results per
-        # query (its own per-call max) rather than splitting max_results
-        # across queries, so the real source has the best chance of being
-        # in what we fetch before we rank/trim down to max_results.
-        for i, search_query in enumerate(search_queries, 1):
-            print(f"\n📌 Searching with Query {i}/{len(search_queries)}: '{search_query[:80]}...'")
-            matches = _perform_google_search(search_query, 10)
-
-            for match in matches:
-                url = match['url']
-                if url not in seen_urls:  # Avoid duplicates
-                    seen_urls.add(url)
-                    all_matches.append(match)
-
-        # Sort by similarity and return top results
-        all_matches.sort(key=lambda x: x['similarity'], reverse=True)
-
-        print(f"\n✅ Internet search completed: {len(all_matches)} unique results found")
-        return all_matches[:max_results]
+        print(f"\n✅ Internet search completed: {len(matches)} results found")
+        return matches[:max_results]
 
     except Exception as e:
         print(f"❌ Internet search error: {e}")
         traceback.print_exc()
         return []
-
-def search_internet_bilingual(
-    hindi_text: str,
-    translated_punjabi: str,
-    max_results: int = 30,
-    use_sentence_search: bool = True
-) -> List[Dict]:
-    """
-    Search the internet using BOTH:
-      - original Hindi text
-      - translated Punjabi text
-
-    Results are merged and deduplicated by URL.
-    """
-    all_matches: List[Dict] = []
-    seen_urls = set()
-
-    # 1) Search with original Hindi text
-    if hindi_text and hindi_text.strip():
-        print("\n🌐 INTERNET SEARCH: ORIGINAL HINDI TEXT")
-        hindi_matches = search_internet_google(
-            hindi_text,
-            max_results=max_results,
-            use_sentence_search=use_sentence_search
-        )
-        for m in hindi_matches:
-            url = m.get("url")
-            if not url or url in seen_urls:
-                continue
-            seen_urls.add(url)
-            m = dict(m)
-            m["query_language"] = "hindi"
-            all_matches.append(m)
-
-    # 2) Search with translated Punjabi text
-    if translated_punjabi and translated_punjabi.strip():
-        print("\n🌐 INTERNET SEARCH: TRANSLATED PUNJABI TEXT")
-        punjabi_matches = search_internet_google(
-            translated_punjabi,
-            max_results=max_results,
-            use_sentence_search=use_sentence_search
-        )
-        for m in punjabi_matches:
-            url = m.get("url")
-            if not url or url in seen_urls:
-                continue
-            seen_urls.add(url)
-            m = dict(m)
-            m["query_language"] = "punjabi"
-            all_matches.append(m)
-
-    # Sort combined list by similarity and trim
-    all_matches.sort(key=lambda x: x.get("similarity", 0.0), reverse=True)
-    print(f"\n✅ Bilingual internet search complete: {len(all_matches)} unique results")
-    return all_matches[:max_results]
 
 def _apply_semantic_similarity(query: str, matches: List[Dict]) -> List[Dict]:
     """
@@ -1688,7 +1558,8 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     """
     Core plagiarism-check pipeline shared by the text-input and
     document-upload endpoints: translate (both EBMT and NMT modes) → corpus
-    matching → bilingual (Hindi + Punjabi) internet search → summary → DB logging.
+    matching → internet search on the translated Punjabi text → summary →
+    DB logging.
     """
     print("\n" + "=" * 80)
     print("PLAGIARISM CHECK STARTED")
@@ -1710,21 +1581,14 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
 
     corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
 
-    # =========== STEP 3: INTERNET SEARCH (GOOGLE) WITH SENTENCE-BASED APPROACH ===========
-    # Search using BOTH the original Hindi input and the translated Punjabi
-    # text, not the translation alone. A translated_punjabi that only
-    # exists as our own EBMT/NMT output rarely matches any real webpage
-    # verbatim, so a plagiarized source only ever surfaced when a near-
-    # identical document already happened to be sitting in the local
-    # corpus (whose own verbatim text is a much better query). Searching
-    # the original Hindi text too lets a real online source be found even
-    # when nothing matching is in the corpus.
-    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED, HINDI + TRANSLATED PUNJABI")
+    # =========== STEP 3: INTERNET SEARCH (GOOGLE) ON TRANSLATED PUNJABI TEXT ===========
+    # Single search criterion: the Hindi input is translated to Punjabi
+    # (STEP 1 above), and that translated Punjabi text is searched on the
+    # internet as a whole-text query.
+    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - TRANSLATED PUNJABI TEXT")
     print("-" * 80)
 
-    internet_matches = search_internet_bilingual(
-        hindi_text, translated_punjabi, max_results=30, use_sentence_search=use_sentence_search
-    )
+    internet_matches = search_internet_google(translated_punjabi, max_results=30)
 
     #=========== PREPARE RESPONSE ===========
     processing_time = (datetime.now() - start_time).total_seconds()
@@ -1750,7 +1614,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'total_matches': len(internet_matches),
             'matches': internet_matches[:40],
             'max_similarity': max([m['similarity'] for m in internet_matches], default=0),
-            'search_method': 'whole-paragraph+english-gloss' if use_sentence_search else 'whole-paragraph'
+            'search_method': 'translated-punjabi-text'
         },
 
         # Summary
@@ -1792,7 +1656,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             response_data['plagiarism_summary']['highest_internet_similarity'],
             processing_time,
             json.dumps(response_data),
-            'whole-paragraph+english-gloss' if use_sentence_search else 'whole-paragraph'))
+            'translated-punjabi-text'))
 
         conn.commit()
         conn.close()
