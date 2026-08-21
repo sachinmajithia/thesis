@@ -261,6 +261,79 @@ class SentenceBasedSearcher:
 
         return hybrid_queries
 
+    def extract_semantic_keyphrases(self, text: str, top_n: int = 5,
+                                     ngram_range: Tuple[int, int] = (2, 5),
+                                     max_candidates: int = 150) -> List[str]:
+        """
+        Extract the most semantically important phrases from text (KeyBERT-
+        style), instead of using raw Hindi/Punjabi sentences as the search
+        query. Candidate n-gram phrases are embedded with the IndicSBERT
+        model and ranked by cosine similarity to the whole-text embedding;
+        Maximal Marginal Relevance then drops near-duplicate phrases so the
+        returned queries stay diverse.
+
+        Returns [] if the semantic model isn't loaded, so callers can fall
+        back to sentence-based queries.
+        """
+        semantic_model = model_cache.get('semantic_model')
+        if not text or not semantic_model:
+            return []
+
+        sentences = self.extract_sentences(text, top_n=20) or [text]
+
+        candidates = []
+        seen = set()
+        for sentence in sentences:
+            words = sentence.split()
+            for n in range(ngram_range[0], min(ngram_range[1], len(words)) + 1):
+                for i in range(len(words) - n + 1):
+                    if len(candidates) >= max_candidates:
+                        break
+                    phrase = re.sub(r'[.,!?;:\'"]+$', '', ' '.join(words[i:i + n])).strip()
+                    if len(phrase) > 8 and phrase.lower() not in seen:
+                        seen.add(phrase.lower())
+                        candidates.append(phrase)
+
+        if not candidates:
+            return []
+
+        try:
+            doc_embedding = semantic_model.encode([text], normalize_embeddings=True)[0]
+            candidate_embeddings = semantic_model.encode(candidates, normalize_embeddings=True)
+        except Exception as e:
+            print(f"⚠️ Semantic keyphrase embedding failed: {e}")
+            return []
+
+        doc_similarities = np.dot(candidate_embeddings, doc_embedding)
+
+        # Maximal Marginal Relevance: prefer phrases relevant to the whole
+        # text but not redundant with phrases already picked.
+        lambda_diversity = 0.7
+        selected_idx = []
+        remaining_idx = list(range(len(candidates)))
+
+        while remaining_idx and len(selected_idx) < top_n:
+            if not selected_idx:
+                best = max(remaining_idx, key=lambda i: doc_similarities[i])
+            else:
+                selected_embeddings = candidate_embeddings[selected_idx]
+
+                def mmr_score(i):
+                    redundancy = np.max(np.dot(selected_embeddings, candidate_embeddings[i]))
+                    return lambda_diversity * doc_similarities[i] - (1 - lambda_diversity) * redundancy
+
+                best = max(remaining_idx, key=mmr_score)
+            selected_idx.append(best)
+            remaining_idx.remove(best)
+
+        keyphrases = [candidates[i] for i in selected_idx]
+
+        print(f"🧠 Extracted {len(keyphrases)} semantic keyphrases (from {len(candidates)} candidates):")
+        for i, kp in enumerate(keyphrases, 1):
+            print(f"   {i}. {kp}")
+
+        return keyphrases
+
 # ============================================================================
 # 2. MODEL LOADING & INITIALIZATION
 # ============================================================================
@@ -711,21 +784,60 @@ def jaccard_similarity(sentence1, sentence2):
 
     return len(intersection) / len(union)
 
-def ebmt_translate(hindi_sentence_to_translate, parallel_corpus, similarity_func):
-    """Example-Based Machine Translation using parallel corpus"""
-    best_match_punjabi = "Translation not found in corpus."
-    highest_similarity = -1.0
+def split_into_sentences(text: str) -> List[str]:
+    """
+    Split multi-line/multi-sentence text (e.g. a poem pasted as one block)
+    into individual lines/sentences. EBMT matches a whole input against a
+    single reference sentence via Jaccard similarity - comparing an entire
+    multi-line block to one short reference sentence dilutes the overlap
+    ratio and (almost) never scores high enough, even when every individual
+    line has an exact match in the parallel corpus. Splitting first lets
+    each line be matched on its own.
+    """
+    sentences = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            sentences.extend([s.strip() for s in sent_tokenize(line) if s.strip()])
+        except Exception:
+            sentences.append(line)
+    return sentences if sentences else ([text.strip()] if text.strip() else [])
 
-    for hindi_ref, punjabi_ref in parallel_corpus:
-        similarity = similarity_func(hindi_sentence_to_translate, hindi_ref)
-        if similarity > highest_similarity:
-            highest_similarity = similarity
-            best_match_punjabi = punjabi_ref
+def ebmt_translate(hindi_text, parallel_corpus, similarity_func):
+    """
+    Example-Based Machine Translation using parallel corpus. Matches the
+    input sentence-by-sentence (see split_into_sentences) rather than as one
+    block, so a multi-line input (e.g. a poem) can still be translated via
+    EBMT when every individual line has a confident match - a single line
+    without one falls the whole input back to "not found" so callers can
+    cascade to NMT.
+    """
+    sentences = split_into_sentences(hindi_text)
+    translated_lines = []
+    similarities = []
 
-    if highest_similarity >= 0.5:
-        return best_match_punjabi, highest_similarity
-    else:
+    for sentence in sentences:
+        best_match_punjabi = "Translation not found in corpus."
+        highest_similarity = -1.0
+
+        for hindi_ref, punjabi_ref in parallel_corpus:
+            similarity = similarity_func(sentence, hindi_ref)
+            if similarity > highest_similarity:
+                highest_similarity = similarity
+                best_match_punjabi = punjabi_ref
+
+        if highest_similarity < 0.5:
+            return "No similar sentence found.", -1.0
+
+        translated_lines.append(best_match_punjabi)
+        similarities.append(highest_similarity)
+
+    if not similarities:
         return "No similar sentence found.", -1.0
+
+    return '\n'.join(translated_lines), min(similarities)
 
 def nmt_translate(hindi_sentence, tokenizer, model, device):
     """Neural Machine Translation using NLLB-200"""
@@ -749,6 +861,37 @@ def nmt_translate(hindi_sentence, tokenizer, model, device):
 
     except Exception as e:
         return f"NMT Error: {str(e)}", -1.0
+
+def translate_to_english(text: str) -> str:
+    """
+    Translate Hindi/Punjabi text to English via NLLB, so internet search can
+    also query in English - most open-web plagiarism sources are English,
+    so a same-script search alone misses them regardless of query quality.
+    """
+    if not text or not text.strip() or not model_cache.get('loaded'):
+        return ""
+
+    try:
+        tokenizer = model_cache['tokenizer']
+        model = model_cache['model']
+        device = model_cache['device']
+        target_lang = "eng_Latn"
+
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            generated_tokens = model.generate(
+                **inputs,
+                forced_bos_token_id=tokenizer.convert_tokens_to_ids(target_lang),
+                max_length=512
+            )
+
+        return tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+
+    except Exception as e:
+        print(f"⚠️ English translation for search failed: {e}")
+        return ""
 
 def translate_hindi_to_punjabi(hindi_sentence):
     """Main translation function with cascade approach: Dictionary -> EBMT -> NMT"""
@@ -1099,39 +1242,77 @@ class EnhancedCorpusManager:
             return []
 
 # ============================================================================
-# 5. ENHANCED INTERNET SEARCH WITH SENTENCE-BASED APPROACH
+# 5. ENHANCED INTERNET SEARCH - WHOLE-PARAGRAPH + ENGLISH-GLOSS APPROACH
 # ============================================================================
 
-def search_internet_google(query: str, max_results: int = 30, use_sentence_search: bool = True) -> List[Dict]:
+def search_internet_google(
+    query: str,
+    max_results: int = 30,
+    use_sentence_search: bool = True,
+    include_english_gloss: bool = True
+) -> List[Dict]:
     """
-    Search Google for similar content using sentence-based approach
+    Search Google for similar content, searching the whole input paragraph
+    as a single query - not split into per-sentence/keyphrase queries - so
+    paragraph-level context and word order are preserved. Also issues a
+    quoted exact-phrase query so verbatim copies (same content, no changes)
+    are actually retrieved from Google rather than ranked out by an
+    unquoted, relevance-only search.
 
     Args:
-        query: Input text to search (usually translated Punjabi)
+        query: Input paragraph to search (usually translated Punjabi)
         max_results: Maximum number of results
-        use_sentence_search: If True, use sentence-based search instead of keyword-level
+        use_sentence_search: If True, also search with an English gloss of
+            the paragraph (name kept for API/UI compatibility)
+        include_english_gloss: Secondary gate on the English-gloss search -
+            most open-web plagiarism sources are English, so a same-script
+            query alone misses them regardless of query quality.
 
     Returns:
         List of search results with similarity scores
     """
     try:
         print(f"\n🌐 Searching Google for similar content...")
-        print(f"📝 Search strategy: {'SENTENCE-BASED' if use_sentence_search else 'KEYWORD-BASED'}")
 
-        # Extract sentences if enabled
-        search_queries = [query]  # Default: use whole query
+        # Google's relevance quality degrades sharply on very long queries
+        # (e.g. a whole uploaded document), so cap each query to roughly one
+        # paragraph's worth of text.
+        MAX_QUERY_CHARS = 300
+        clean_query = query.strip()[:MAX_QUERY_CHARS]
 
-        if use_sentence_search and model_cache.get('sentence_searcher'):
-            sentence_searcher = model_cache['sentence_searcher']
-            search_queries = sentence_searcher.create_sentence_queries(query, num_queries=5)
+        # An unquoted query lets Google match on term overlap/relevance, so a
+        # page that is a verbatim copy can still rank below unrelated pages
+        # and never even make it into the (small) result set we fetch. A
+        # quoted exact-phrase query forces Google to only return pages
+        # containing that literal text, which is what actually catches
+        # word-for-word copies. Kept short (not the full paragraph) since a
+        # very long quoted phrase breaks on the smallest formatting
+        # difference.
+        EXACT_PHRASE_CHARS = 120
+        exact_phrase_query = f'"{clean_query[:EXACT_PHRASE_CHARS]}"'
+
+        search_queries = [exact_phrase_query, clean_query]
+        strategy = 'EXACT-PHRASE+WHOLE-PARAGRAPH'
+
+        if use_sentence_search and include_english_gloss and model_cache.get('loaded'):
+            english_gloss = translate_to_english(clean_query).strip()
+            if english_gloss and english_gloss.lower() != clean_query.lower():
+                search_queries.append(english_gloss[:MAX_QUERY_CHARS])
+                strategy += '+ENGLISH-GLOSS'
+
+        print(f"📝 Search strategy: {strategy}")
 
         all_matches = []
         seen_urls = set()
 
-        # Perform searches for each sentence
+        # Perform search for each query (exact phrase, whole paragraph, plus
+        # English gloss). Always ask Google for a full page of results per
+        # query (its own per-call max) rather than splitting max_results
+        # across queries, so the real source has the best chance of being
+        # in what we fetch before we rank/trim down to max_results.
         for i, search_query in enumerate(search_queries, 1):
             print(f"\n📌 Searching with Query {i}/{len(search_queries)}: '{search_query[:80]}...'")
-            matches = _perform_google_search(search_query, max_results // len(search_queries) + 2)
+            matches = _perform_google_search(search_query, 10)
 
             for match in matches:
                 url = match['url']
@@ -1205,6 +1386,33 @@ def search_internet_bilingual(
     print(f"\n✅ Bilingual internet search complete: {len(all_matches)} unique results")
     return all_matches[:max_results]
 
+def _apply_semantic_similarity(query: str, matches: List[Dict]) -> List[Dict]:
+    """
+    Replace the rank-based similarity heuristic with a real semantic score:
+    cosine similarity between the query and each result's title+snippet,
+    using the same IndicSBERT model already used for corpus matching. This
+    is what makes the Google search "semantic" - relevance is judged by
+    meaning rather than by Google's result position. Falls back to the
+    existing rank-based score if the model isn't loaded.
+    """
+    semantic_model = model_cache.get('semantic_model')
+    if not semantic_model or not matches:
+        return matches
+
+    try:
+        texts = [f"{m.get('title', '')}. {m.get('snippet', '')}".strip() for m in matches]
+        embeddings = semantic_model.encode([query] + texts, normalize_embeddings=True)
+        query_embedding, result_embeddings = embeddings[0], embeddings[1:]
+        similarities = np.dot(result_embeddings, query_embedding)
+
+        for match, similarity in zip(matches, similarities):
+            match['similarity'] = float(similarity)
+            match['similarity_type'] = 'semantic'
+    except Exception as e:
+        print(f"⚠️ Semantic re-ranking failed, keeping rank-based similarity: {e}")
+
+    return matches
+
 def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
     """
     Perform actual Google search for a single query
@@ -1270,7 +1478,8 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                         }
                         matches.append(match)
 
-                    print(f"✅ Returning {len(matches)} Google API results")
+                    matches = _apply_semantic_similarity(query, matches)
+                    print(f"✅ Returning {len(matches)} Google API results (semantically re-ranked)")
 
                     return matches
 
@@ -1351,7 +1560,8 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                         }
                         matches.append(match)
 
-                    print(f"✅ Returning {len(matches)} SerpAPI results")
+                    matches = _apply_semantic_similarity(query, matches)
+                    print(f"✅ Returning {len(matches)} SerpAPI results (semantically re-ranked)")
                     return matches
 
                 elif response.status_code == 403:
@@ -1543,8 +1753,8 @@ def upload_document_corpus():
         if not allowed_file(file.filename):
             return jsonify({'success': False, 'error': f'File type not allowed. Allowed: {", ".join(app.config["ALLOWED_EXTENSIONS"])}'}), 400
 
-        # Get metadata
-        title = request.form.get('title', file.filename)
+        # Get metadata - the file name is always used as the title
+        title = file.filename
         tags = request.form.getlist('tags')
 
         # Save uploaded file temporarily
@@ -1608,11 +1818,50 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
 
     corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
 
-    # =========== STEP 3: INTERNET SEARCH (GOOGLE) WITH SENTENCE-BASED APPROACH ===========
-    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED FOR TRANSLATED CONTENT")
-    print("-" * 80)
+    # =========== STEP 3: INTERNET SEARCH (GOOGLE) ===========
+    # Prefer searching with the top corpus match's own text when it's a
+    # strong (>50%) match - a corpus document is often itself sourced from a
+    # website, so its real wording is far more likely to be a verbatim (or
+    # near-verbatim) hit online than our own translation. If no corpus match
+    # qualifies (e.g. EBMT fails and NMT's translation doesn't resemble
+    # anything already in the corpus), fall back to searching with the
+    # translated Punjabi text directly, so internet search still runs
+    # instead of silently finding nothing whenever EBMT doesn't succeed.
+    CORPUS_MATCH_INTERNET_THRESHOLD = 0.5
+    internet_matches = []
+    internet_search_source = 'none'
 
-    internet_matches = search_internet_google(translated_punjabi, max_results=30, use_sentence_search=use_sentence_search)
+    if corpus_matches and corpus_matches[0]['similarity'] > CORPUS_MATCH_INTERNET_THRESHOLD:
+        print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - CORPUS-MATCHED TEXT (>50% SIMILARITY)")
+        print("-" * 80)
+
+        top_corpus_match = corpus_matches[0]
+        # content_preview may end with a literal "..." truncation marker -
+        # strip it so it isn't sent as part of the exact-phrase query.
+        corpus_query_text = top_corpus_match['content_preview']
+        if corpus_query_text.endswith('...'):
+            corpus_query_text = corpus_query_text[:-3]
+
+        internet_matches = search_internet_google(
+            corpus_query_text,
+            max_results=5,
+            use_sentence_search=use_sentence_search
+        )
+        internet_search_source = 'corpus_match'
+
+    elif translated_punjabi and translated_punjabi.strip():
+        print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - TRANSLATED TEXT (NO QUALIFYING CORPUS MATCH)")
+        print("-" * 80)
+
+        internet_matches = search_internet_google(
+            translated_punjabi,
+            max_results=5,
+            use_sentence_search=use_sentence_search
+        )
+        internet_search_source = 'translated_text'
+
+    total_internet_matches = len(internet_matches)
+    highest_internet_similarity = max([m['similarity'] for m in internet_matches], default=0)
 
     #=========== PREPARE RESPONSE ===========
     processing_time = (datetime.now() - start_time).total_seconds()
@@ -1633,26 +1882,32 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'max_similarity': max([m['similarity'] for m in corpus_matches], default=0)
         },
 
-        # Internet Results
+        # Internet Results - searched with the top corpus match's own text
+        # when one qualifies (>50%), otherwise with the translated Punjabi
+        # text so internet search still runs even when EBMT fails and NMT's
+        # output doesn't resemble anything in the corpus. 'source' records
+        # which one was actually used: 'corpus_match', 'translated_text', or
+        # 'none' (no corpus match and no translation to fall back to).
         'internet_results': {
-            'total_matches': len(internet_matches),
-            'matches': internet_matches[:40],
-            'max_similarity': max([m['similarity'] for m in internet_matches], default=0),
-            'search_method': 'sentence-based' if use_sentence_search else 'keyword-based'
+            'matches': internet_matches[:5],
+            'source': internet_search_source,
+            'total_matches': total_internet_matches,
+            'max_similarity': highest_internet_similarity,
+            'search_method': 'whole-paragraph+english-gloss' if use_sentence_search else 'whole-paragraph'
         },
 
         # Summary
         'plagiarism_summary': {
-            'total_matches': len(corpus_matches) + len(internet_matches),
+            'total_matches': len(corpus_matches) + total_internet_matches,
             'corpus_matches': len(corpus_matches),
-            'internet_matches': len(internet_matches),
+            'internet_matches': total_internet_matches,
             'highest_corpus_similarity': max([m['similarity'] for m in corpus_matches], default=0),
-            'highest_internet_similarity': max([m['similarity'] for m in internet_matches], default=0),
+            'highest_internet_similarity': highest_internet_similarity,
             'overall_similarity': max(
                 max([m['similarity'] for m in corpus_matches], default=0),
-                max([m['similarity'] for m in internet_matches], default=0)
+                highest_internet_similarity
             ),
-            'plagiarism_detected': len(corpus_matches) > 0 or len(internet_matches) > 0
+            'plagiarism_detected': len(corpus_matches) > 0 or total_internet_matches > 0
         },
         'processing_time': round(processing_time, 2)
     }
@@ -1676,11 +1931,11 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             (hindi_text, 'hindi', translated_punjabi, corpus_manager.corpus_cache.get('corpus_size', 0),
             len(corpus_matches),
             response_data['plagiarism_summary']['highest_corpus_similarity'],
-            len(internet_matches),
+            total_internet_matches,
             response_data['plagiarism_summary']['highest_internet_similarity'],
             processing_time,
             json.dumps(response_data),
-            'sentence-based' if use_sentence_search else 'keyword-based'))
+            'whole-paragraph+english-gloss' if use_sentence_search else 'whole-paragraph'))
 
         conn.commit()
         conn.close()
