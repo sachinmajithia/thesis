@@ -1609,10 +1609,20 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
 
     # =========== STEP 3: INTERNET SEARCH (GOOGLE) WITH SENTENCE-BASED APPROACH ===========
-    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED FOR TRANSLATED CONTENT")
+    # Search using BOTH the original Hindi input and the translated Punjabi
+    # text, not the translation alone. A translated_punjabi that only
+    # exists as our own EBMT/NMT output rarely matches any real webpage
+    # verbatim, so a plagiarized source only ever surfaced when a near-
+    # identical document already happened to be sitting in the local
+    # corpus (whose own verbatim text is a much better query). Searching
+    # the original Hindi text too lets a real online source be found even
+    # when nothing matching is in the corpus.
+    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED, HINDI + TRANSLATED PUNJABI")
     print("-" * 80)
 
-    internet_matches = search_internet_google(translated_punjabi, max_results=30, use_sentence_search=use_sentence_search)
+    internet_matches = search_internet_bilingual(
+        hindi_text, translated_punjabi, max_results=30, use_sentence_search=use_sentence_search
+    )
 
     #=========== PREPARE RESPONSE ===========
     processing_time = (datetime.now() - start_time).total_seconds()
