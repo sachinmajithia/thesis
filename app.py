@@ -711,21 +711,61 @@ def jaccard_similarity(sentence1, sentence2):
 
     return len(intersection) / len(union)
 
-def ebmt_translate(hindi_sentence_to_translate, parallel_corpus, similarity_func):
-    """Example-Based Machine Translation using parallel corpus"""
-    best_match_punjabi = "Translation not found in corpus."
-    highest_similarity = -1.0
+# EBMT matches whole SENTENCES against the parallel corpus. Devanagari
+# sentences typically end in "।" (danda), which nltk's English-trained punkt
+# tokenizer doesn't recognize as a boundary, so a lightweight regex split on
+# the actual Hindi/Punjabi/Latin sentence-enders is used instead of
+# sent_tokenize() here.
+_SENTENCE_END_RE = re.compile(r'(?<=[।!?.])\s+')
 
-    for hindi_ref, punjabi_ref in parallel_corpus:
-        similarity = similarity_func(hindi_sentence_to_translate, hindi_ref)
-        if similarity > highest_similarity:
-            highest_similarity = similarity
-            best_match_punjabi = punjabi_ref
+def split_into_sentences(text):
+    """Split text into sentences, keeping the terminating punctuation attached."""
+    text = (text or '').strip()
+    if not text:
+        return []
+    return [s.strip() for s in _SENTENCE_END_RE.split(text) if s.strip()]
 
-    if highest_similarity >= 0.5:
-        return best_match_punjabi, highest_similarity
-    else:
+def ebmt_translate(hindi_text_to_translate, parallel_corpus, similarity_func):
+    """
+    Example-Based Machine Translation using the parallel corpus.
+
+    The corpus holds single sentences, so matching only works when the input
+    is matched sentence-by-sentence: comparing a whole multi-sentence input
+    (e.g. an uploaded document or a pasted paragraph) against single-sentence
+    corpus entries in one shot dilutes the Jaccard overlap and almost always
+    scores below the match threshold, even when every sentence in the input
+    is verbatim in the corpus. Splitting first and translating each sentence
+    independently is what makes EBMT actually fire on realistic input.
+    """
+    sentences = split_into_sentences(hindi_text_to_translate) or [hindi_text_to_translate]
+
+    translated_sentences = []
+    similarities = []
+    any_match = False
+
+    for sentence in sentences:
+        best_match_punjabi = sentence
+        highest_similarity = -1.0
+
+        for hindi_ref, punjabi_ref in parallel_corpus:
+            similarity = similarity_func(sentence, hindi_ref)
+            if similarity > highest_similarity:
+                highest_similarity = similarity
+                best_match_punjabi = punjabi_ref
+
+        if highest_similarity >= 0.5:
+            translated_sentences.append(best_match_punjabi)
+            similarities.append(highest_similarity)
+            any_match = True
+        else:
+            # Keep the untranslated sentence rather than dropping it, so the
+            # rest of a multi-sentence input still comes through.
+            translated_sentences.append(sentence)
+
+    if not any_match:
         return "No similar sentence found.", -1.0
+
+    return ' '.join(translated_sentences), sum(similarities) / len(similarities)
 
 def nmt_translate(hindi_sentence, tokenizer, model, device):
     """Neural Machine Translation using NLLB-200"""
