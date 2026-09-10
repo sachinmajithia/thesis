@@ -37,6 +37,11 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 # lower-DPI scan; --scan-dpi is expressed relative to this.
 SHARP_REFERENCE_DPI = 300.0
 
+# Shared tint both shadow effects blend toward, so the card's own drop
+# shadow and the page-wide shading read as the same light source rather
+# than two visually distinct effects.
+SHADOW_COLOR = (40, 40, 40)
+
 # Drop shadow behind the tilted card, randomized within these ranges (sized
 # relative to the card's own width) so each card reads as a physical object
 # placed on the page rather than a flat rotated cutout, with natural
@@ -210,7 +215,7 @@ def paste_card_with_shadow(page: Image.Image, card: Image.Image, x: int, y: int)
     blur_radius = max(1.0, random.uniform(*SHADOW_BLUR_FRACTION_RANGE) * card.width)
     opacity = random.uniform(*SHADOW_OPACITY_RANGE)
 
-    shadow = Image.new("RGBA", card.size, (40, 40, 40, 0))
+    shadow = Image.new("RGBA", card.size, SHADOW_COLOR + (0,))
     shadow.putalpha(shadow_mask.point(lambda a: int(a * opacity / 255)))
     shadow = shadow.filter(ImageFilter.GaussianBlur(radius=blur_radius))
 
@@ -221,7 +226,12 @@ def paste_card_with_shadow(page: Image.Image, card: Image.Image, x: int, y: int)
 def apply_page_shading(page: Image.Image) -> Image.Image:
     """Darken the whole page with soft, irregular patches whose intensity
     varies randomly across the sheet (and from page to page), mimicking an
-    unevenly lit scanner bed rather than a perfectly uniform white sheet."""
+    unevenly lit scanner bed rather than a perfectly uniform white sheet.
+
+    Uses the same "blend toward SHADOW_COLOR through a soft alpha mask"
+    approach as the card's own drop shadow (rather than a flat brightness
+    subtraction), so the two read as one consistent light source instead of
+    two visually distinct effects."""
     w, h = page.size
     cols, rows = PAGE_SHADING_BLOB_GRID
 
@@ -230,11 +240,10 @@ def apply_page_shading(page: Image.Image) -> Image.Image:
     blob_mask = blob_mask.filter(ImageFilter.GaussianBlur(radius=max(w, h) * PAGE_SHADING_BLUR_FRACTION))
 
     max_intensity = random.uniform(*PAGE_SHADING_INTENSITY_RANGE)
-    darkness = (np.asarray(blob_mask).astype(np.float32) / 255.0) * max_intensity
+    alpha_mask = blob_mask.point(lambda a: int(a * max_intensity / 255))
 
-    arr = np.asarray(page.convert("RGB")).astype(np.float32)
-    arr -= darkness[..., None]
-    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode="RGB")
+    tint = Image.new("RGB", page.size, SHADOW_COLOR)
+    return Image.composite(tint, page.convert("RGB"), alpha_mask)
 
 
 def compose_page(
@@ -251,7 +260,12 @@ def compose_page(
     margin = mm_to_px(margin_mm, dpi)
     gap = mm_to_px(gap_mm, dpi)
 
-    page = Image.new("RGBA", (page_w, page_h), color=(255, 255, 255, 255))
+    # Shade the blank page first, then composite the card and its own
+    # shadow on top: wherever the page-wide shading is already darker, the
+    # card's shadow blends into it instead of a flat wash being painted
+    # over everything (card included) as a separate, disconnected step.
+    page = Image.new("RGB", (page_w, page_h), color=(255, 255, 255))
+    page = apply_page_shading(page)
 
     usable_w = page_w - 2 * margin
     usable_h = page_h - 2 * margin - gap * (len(images) - 1)
@@ -268,7 +282,7 @@ def compose_page(
         paste_card_with_shadow(page, resized, x, y_center)
         y += slot_h + gap
 
-    return apply_page_shading(page)
+    return page
 
 
 def build_pdf(
