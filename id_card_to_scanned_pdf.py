@@ -56,6 +56,14 @@ SHADOW_NOISE_GRID = 14  # coarse grid resolution the noise is generated at
 SHADOW_NOISE_AMPLITUDE = 70  # 0-255
 SHADOW_MAX_SPREAD_FRACTION = 0.05
 
+# A separate, broader shading pass covering the whole page: soft, uneven
+# patches of darkness (like an unevenly lit scanner bed or dirty glass),
+# with the darkness amount varying randomly both across the page and from
+# one page to the next.
+PAGE_SHADING_BLOB_GRID = (7, 10)  # coarse (cols, rows) grid the blobs are generated at
+PAGE_SHADING_BLUR_FRACTION = 0.06  # blob softness, relative to the page's longer side
+PAGE_SHADING_INTENSITY_RANGE = (10, 70)  # 0-255 max darkness, randomized per page
+
 
 def load_image(path: str) -> Image.Image:
     img = Image.open(path)
@@ -192,6 +200,25 @@ def paste_card_with_shadow(page: Image.Image, card: Image.Image, x: int, y: int)
     page.paste(card, (x, y), card)
 
 
+def apply_page_shading(page: Image.Image) -> Image.Image:
+    """Darken the whole page with soft, irregular patches whose intensity
+    varies randomly across the sheet (and from page to page), mimicking an
+    unevenly lit scanner bed rather than a perfectly uniform white sheet."""
+    w, h = page.size
+    cols, rows = PAGE_SHADING_BLOB_GRID
+
+    noise = np.random.uniform(0.0, 1.0, (rows, cols)).astype(np.float32)
+    blob_mask = Image.fromarray((noise * 255).astype(np.uint8), mode="L").resize((w, h), Image.BICUBIC)
+    blob_mask = blob_mask.filter(ImageFilter.GaussianBlur(radius=max(w, h) * PAGE_SHADING_BLUR_FRACTION))
+
+    max_intensity = random.uniform(*PAGE_SHADING_INTENSITY_RANGE)
+    darkness = (np.asarray(blob_mask).astype(np.float32) / 255.0) * max_intensity
+
+    arr = np.asarray(page.convert("RGB")).astype(np.float32)
+    arr -= darkness[..., None]
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode="RGB")
+
+
 def compose_page(
     images,
     dpi: int,
@@ -223,7 +250,7 @@ def compose_page(
         paste_card_with_shadow(page, resized, x, y_center)
         y += slot_h + gap
 
-    return page.convert("RGB")
+    return apply_page_shading(page)
 
 
 def build_pdf(
