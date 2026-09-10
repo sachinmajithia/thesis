@@ -9,6 +9,7 @@ Usage:
     python id_card_to_scanned_pdf.py front.jpg back.jpg -o id_card_scan.pdf
     python id_card_to_scanned_pdf.py front.jpg back.jpg --same-page
     python id_card_to_scanned_pdf.py *.jpg --grayscale --page-size letter
+    python id_card_to_scanned_pdf.py front.jpg --scan-dpi 75  # softer/blurrier, low-DPI look
 
     # Batch mode: pick every image in a folder and write one PDF per image,
     # each PDF named after its source image (front.jpg -> front.pdf)
@@ -31,9 +32,16 @@ PAGE_SIZES_MM = {
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
-# Gaussian blur radius at 100% is this fraction of the card's own width, so
-# "blur percent" scales with the card regardless of source photo resolution.
-BLUR_RADIUS_FRACTION = 0.02
+# Resolution above which a card is treated as "sharp" when simulating a
+# lower-DPI scan; --scan-dpi is expressed relative to this.
+SHARP_REFERENCE_DPI = 300.0
+
+# Drop shadow behind the tilted card, sized relative to the card's own width,
+# so the card reads as a physical object placed on the page rather than a
+# flat rotated cutout.
+SHADOW_OFFSET_FRACTION = 0.012
+SHADOW_BLUR_FRACTION = 0.02
+SHADOW_OPACITY = 90  # 0-255
 
 
 def load_image(path: str) -> Image.Image:
@@ -51,10 +59,14 @@ def add_scan_grain(img: Image.Image, amount: float = 6.0) -> Image.Image:
 
 
 def deskew(img: Image.Image, angle: float) -> Image.Image:
+    """Rotate the card, leaving the exposed corners transparent (RGBA) so the
+    caller can composite a shadow and let the page background show through,
+    instead of a flat white-filled cutout."""
+    rgba = img.convert("RGBA")
     if angle == 0:
-        return img
-    return img.rotate(
-        angle, expand=True, fillcolor=(255, 255, 255), resample=Image.BICUBIC
+        return rgba
+    return rgba.rotate(
+        angle, expand=True, fillcolor=(0, 0, 0, 0), resample=Image.BICUBIC
     )
 
 
@@ -67,12 +79,16 @@ def random_tilt_angle(min_degrees: float, max_degrees: float) -> float:
     return magnitude if random.random() < 0.5 else -magnitude
 
 
-def apply_blur(img: Image.Image, blur_percent: float) -> Image.Image:
-    """Blur the card by a percentage of its own width (0-100+)."""
-    if not blur_percent:
+def simulate_low_dpi(img: Image.Image, scan_dpi: float, reference_dpi: float = SHARP_REFERENCE_DPI) -> Image.Image:
+    """Soften the card the way a real low-resolution scan would: downsample
+    to the apparent scan_dpi, then upsample back, so detail is genuinely
+    lost rather than just blurred over."""
+    if not scan_dpi or scan_dpi >= reference_dpi:
         return img
-    radius = (blur_percent / 100.0) * img.width * BLUR_RADIUS_FRACTION
-    return img.filter(ImageFilter.GaussianBlur(radius=radius))
+    scale = max(scan_dpi / reference_dpi, 0.05)
+    small_size = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
+    small = img.resize(small_size, Image.BILINEAR)
+    return small.resize(img.size, Image.BILINEAR)
 
 
 def apply_scan_look(
@@ -82,15 +98,13 @@ def apply_scan_look(
     tilt_max: float = 10.0,
     contrast: float = 1.25,
     brightness: float = 1.08,
-    sharpen: bool = True,
     grain: float = 5.0,
-    blur: float = 55.0,
+    scan_dpi: float = 100.0,
 ) -> Image.Image:
-    """Process a single ID card photo to resemble a scanned card."""
-    processed = img
-
-    angle = random_tilt_angle(tilt_min, tilt_max)
-    processed = deskew(processed, angle)
+    """Process a single ID card photo to resemble a scanned card. Returns an
+    RGBA image already rotated by the chosen tilt angle, with transparent
+    corners where the rotation exposed the page behind it."""
+    processed = img.convert("RGB")
 
     if grayscale:
         processed = ImageOps.grayscale(processed).convert("RGB")
@@ -98,20 +112,35 @@ def apply_scan_look(
     processed = ImageEnhance.Contrast(processed).enhance(contrast)
     processed = ImageEnhance.Brightness(processed).enhance(brightness)
 
-    if sharpen:
-        processed = processed.filter(ImageFilter.UnsharpMask(radius=2, percent=60))
-
-    if blur:
-        processed = apply_blur(processed, blur)
+    if scan_dpi:
+        processed = simulate_low_dpi(processed, scan_dpi)
 
     if grain:
         processed = add_scan_grain(processed, amount=grain)
 
-    return processed
+    angle = random_tilt_angle(tilt_min, tilt_max)
+    return deskew(processed, angle)
 
 
 def mm_to_px(mm: float, dpi: int) -> int:
     return int(round(mm / 25.4 * dpi))
+
+
+def paste_card_with_shadow(page: Image.Image, card: Image.Image, x: int, y: int) -> None:
+    """Paste an RGBA (possibly tilted, transparent-cornered) card onto the
+    page with a soft drop shadow, so it reads as a card placed on a scanner
+    rather than a flat rotated cutout."""
+    alpha = card.split()[-1]
+
+    offset = max(1, int(card.width * SHADOW_OFFSET_FRACTION))
+    blur_radius = max(1.0, card.width * SHADOW_BLUR_FRACTION)
+
+    shadow = Image.new("RGBA", card.size, (40, 40, 40, 0))
+    shadow.putalpha(alpha.point(lambda a: int(a * SHADOW_OPACITY / 255)))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+    page.paste(shadow, (x + offset, y + offset), shadow)
+    page.paste(card, (x, y), card)
 
 
 def compose_page(
@@ -128,7 +157,7 @@ def compose_page(
     margin = mm_to_px(margin_mm, dpi)
     gap = mm_to_px(gap_mm, dpi)
 
-    page = Image.new("RGB", (page_w, page_h), color=(255, 255, 255))
+    page = Image.new("RGBA", (page_w, page_h), color=(255, 255, 255, 255))
 
     usable_w = page_w - 2 * margin
     usable_h = page_h - 2 * margin - gap * (len(images) - 1)
@@ -142,10 +171,10 @@ def compose_page(
 
         x = margin + (usable_w - new_size[0]) // 2
         y_center = y + (slot_h - new_size[1]) // 2
-        page.paste(resized, (x, y_center))
+        paste_card_with_shadow(page, resized, x, y_center)
         y += slot_h + gap
 
-    return page
+    return page.convert("RGB")
 
 
 def build_pdf(
@@ -158,7 +187,7 @@ def build_pdf(
     tilt_min: float = 5.0,
     tilt_max: float = 10.0,
     grain: float = 5.0,
-    blur: float = 55.0,
+    scan_dpi: float = 100.0,
 ):
     if page_size not in PAGE_SIZES_MM:
         raise ValueError(f"Unknown page size '{page_size}'. Choose from {list(PAGE_SIZES_MM)}")
@@ -171,7 +200,7 @@ def build_pdf(
             tilt_min=tilt_min,
             tilt_max=tilt_max,
             grain=grain,
-            blur=blur,
+            scan_dpi=scan_dpi,
         )
         for path in input_paths
     ]
@@ -209,7 +238,7 @@ def batch_convert_folder(
     tilt_min: float = 5.0,
     tilt_max: float = 10.0,
     grain: float = 5.0,
-    blur: float = 55.0,
+    scan_dpi: float = 100.0,
 ):
     """Convert every image in input_dir into its own scanned-style PDF,
     named after the source image, written into output_dir."""
@@ -233,7 +262,7 @@ def batch_convert_folder(
             tilt_min=tilt_min,
             tilt_max=tilt_max,
             grain=grain,
-            blur=blur,
+            scan_dpi=scan_dpi,
         )
         output_paths.append(output_path)
 
@@ -265,7 +294,13 @@ def parse_args(argv=None):
     parser.add_argument("--tilt-min", type=float, default=5.0, help="Minimum random tilt angle in degrees (default: 5.0)")
     parser.add_argument("--tilt-max", type=float, default=10.0, help="Maximum random tilt angle in degrees, left or right (default: 10.0, 0 to disable tilt)")
     parser.add_argument("--grain", type=float, default=5.0, help="Scan grain/noise intensity (default: 5.0, 0 to disable)")
-    parser.add_argument("--blur", type=float, default=55.0, help="Blur intensity as a percentage of card width (default: 55.0, 0 to disable)")
+    parser.add_argument(
+        "--scan-dpi",
+        type=float,
+        default=100.0,
+        help="Apparent scan resolution used to blur the card via a realistic downsample/upsample "
+        "(default: 100.0; lower = blurrier, e.g. 75; raise toward 300 to sharpen, 0 to disable)",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible tilt/grain")
     return parser.parse_args(argv)
 
@@ -288,7 +323,7 @@ def main(argv=None):
             tilt_min=args.tilt_min,
             tilt_max=args.tilt_max,
             grain=args.grain,
-            blur=args.blur,
+            scan_dpi=args.scan_dpi,
         )
         print(f"Saved {len(output_paths)} scanned-style PDF(s) to {output_dir}:")
         for path in output_paths:
@@ -305,7 +340,7 @@ def main(argv=None):
         tilt_min=args.tilt_min,
         tilt_max=args.tilt_max,
         grain=args.grain,
-        blur=args.blur,
+        scan_dpi=args.scan_dpi,
     )
     print(f"Saved scanned-style PDF to {args.output}")
 
