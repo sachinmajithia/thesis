@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-Convert one or more ID card photos into a single PDF that looks like a
-flatbed-scanned document (deskewed, high-contrast/grayscale, paper-white
-page background, light scan grain).
+Convert ID card photos into PDF(s) that look like a flatbed-scanned document
+(deskewed, high-contrast/grayscale, paper-white page background, light scan
+grain).
 
 Usage:
+    # Combine explicit files into one PDF
     python id_card_to_scanned_pdf.py front.jpg back.jpg -o id_card_scan.pdf
     python id_card_to_scanned_pdf.py front.jpg back.jpg --same-page
     python id_card_to_scanned_pdf.py *.jpg --color --page-size letter
+
+    # Batch mode: pick every image in a folder and write one PDF per image,
+    # each PDF named after its source image (front.jpg -> front.pdf)
+    python id_card_to_scanned_pdf.py ./id_cards
+    python id_card_to_scanned_pdf.py ./id_cards --output-dir ./scanned_pdfs
 """
 
 import argparse
-import io
+import os
 import random
 import sys
 
@@ -22,6 +28,8 @@ PAGE_SIZES_MM = {
     "a4": (210, 297),
     "letter": (215.9, 279.4),
 }
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
 
 def load_image(path: str) -> Image.Image:
@@ -153,10 +161,65 @@ def build_pdf(
     )
 
 
+def list_images_in_dir(folder: str):
+    entries = sorted(os.listdir(folder))
+    return [
+        os.path.join(folder, name)
+        for name in entries
+        if os.path.splitext(name)[1].lower() in IMAGE_EXTENSIONS
+    ]
+
+
+def batch_convert_folder(
+    input_dir: str,
+    output_dir: str,
+    dpi: int = 300,
+    page_size: str = "a4",
+    grayscale: bool = True,
+    jitter_angle: float = 1.0,
+    grain: float = 5.0,
+):
+    """Convert every image in input_dir into its own scanned-style PDF,
+    named after the source image, written into output_dir."""
+    image_paths = list_images_in_dir(input_dir)
+    if not image_paths:
+        raise ValueError(f"No image files found in '{input_dir}' (looked for {sorted(IMAGE_EXTENSIONS)})")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_paths = []
+    for path in image_paths:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        output_path = os.path.join(output_dir, f"{stem}.pdf")
+        build_pdf(
+            input_paths=[path],
+            output_path=output_path,
+            dpi=dpi,
+            page_size=page_size,
+            grayscale=grayscale,
+            same_page=False,
+            jitter_angle=jitter_angle,
+            grain=grain,
+        )
+        output_paths.append(output_path)
+
+    return output_paths
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("images", nargs="+", help="Path(s) to ID card image(s), e.g. front.jpg back.jpg")
-    parser.add_argument("-o", "--output", default="id_card_scan.pdf", help="Output PDF path")
+    parser.add_argument(
+        "images",
+        nargs="+",
+        help="Path(s) to ID card image(s) (front.jpg back.jpg ...), or a single folder path "
+        "to batch-convert every image in it into its own same-named PDF",
+    )
+    parser.add_argument("-o", "--output", default="id_card_scan.pdf", help="Output PDF path (ignored in folder/batch mode)")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Folder mode only: where to write the per-image PDFs (default: same folder as the input images)",
+    )
     parser.add_argument("--dpi", type=int, default=300, help="Output resolution in DPI (default: 300)")
     parser.add_argument("--page-size", choices=list(PAGE_SIZES_MM), default="a4", help="Output page size")
     parser.add_argument("--color", action="store_true", help="Keep color instead of converting to grayscale")
@@ -178,6 +241,23 @@ def main(argv=None):
     if args.seed is not None:
         random.seed(args.seed)
         np.random.seed(args.seed)
+
+    if len(args.images) == 1 and os.path.isdir(args.images[0]):
+        input_dir = args.images[0]
+        output_dir = args.output_dir or input_dir
+        output_paths = batch_convert_folder(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            dpi=args.dpi,
+            page_size=args.page_size,
+            grayscale=not args.color,
+            jitter_angle=args.jitter,
+            grain=args.grain,
+        )
+        print(f"Saved {len(output_paths)} scanned-style PDF(s) to {output_dir}:")
+        for path in output_paths:
+            print(f"  {path}")
+        return
 
     build_pdf(
         input_paths=args.images,
