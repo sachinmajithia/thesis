@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import math
 import os
 import random
 import sys
@@ -36,12 +37,13 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 # lower-DPI scan; --scan-dpi is expressed relative to this.
 SHARP_REFERENCE_DPI = 300.0
 
-# Drop shadow behind the tilted card, sized relative to the card's own width,
-# so the card reads as a physical object placed on the page rather than a
-# flat rotated cutout.
-SHADOW_OFFSET_FRACTION = 0.012
-SHADOW_BLUR_FRACTION = 0.02
-SHADOW_OPACITY = 90  # 0-255
+# Drop shadow behind the tilted card, randomized within these ranges (sized
+# relative to the card's own width) so each card reads as a physical object
+# placed on the page rather than a flat rotated cutout, with natural
+# card-to-card variation instead of one identical shadow every time.
+SHADOW_OFFSET_FRACTION_RANGE = (0.006, 0.018)
+SHADOW_BLUR_FRACTION_RANGE = (0.015, 0.03)
+SHADOW_OPACITY_RANGE = (50, 120)  # 0-255
 
 
 def load_image(path: str) -> Image.Image:
@@ -94,8 +96,8 @@ def simulate_low_dpi(img: Image.Image, scan_dpi: float, reference_dpi: float = S
 def apply_scan_look(
     img: Image.Image,
     grayscale: bool = False,
-    tilt_min: float = 5.0,
-    tilt_max: float = 10.0,
+    tilt_min: float = 3.0,
+    tilt_max: float = 8.0,
     contrast: float = 1.25,
     brightness: float = 1.08,
     grain: float = 5.0,
@@ -129,17 +131,23 @@ def mm_to_px(mm: float, dpi: int) -> int:
 def paste_card_with_shadow(page: Image.Image, card: Image.Image, x: int, y: int) -> None:
     """Paste an RGBA (possibly tilted, transparent-cornered) card onto the
     page with a soft drop shadow, so it reads as a card placed on a scanner
-    rather than a flat rotated cutout."""
+    rather than a flat rotated cutout. The shadow's direction, offset, blur,
+    and opacity are all randomized per card for natural variation."""
     alpha = card.split()[-1]
 
-    offset = max(1, int(card.width * SHADOW_OFFSET_FRACTION))
-    blur_radius = max(1.0, card.width * SHADOW_BLUR_FRACTION)
+    offset_magnitude = random.uniform(*SHADOW_OFFSET_FRACTION_RANGE) * card.width
+    direction = random.uniform(0, 2 * math.pi)
+    dx = int(round(offset_magnitude * math.cos(direction)))
+    dy = int(round(offset_magnitude * math.sin(direction)))
+
+    blur_radius = max(1.0, random.uniform(*SHADOW_BLUR_FRACTION_RANGE) * card.width)
+    opacity = random.uniform(*SHADOW_OPACITY_RANGE)
 
     shadow = Image.new("RGBA", card.size, (40, 40, 40, 0))
-    shadow.putalpha(alpha.point(lambda a: int(a * SHADOW_OPACITY / 255)))
+    shadow.putalpha(alpha.point(lambda a: int(a * opacity / 255)))
     shadow = shadow.filter(ImageFilter.GaussianBlur(radius=blur_radius))
 
-    page.paste(shadow, (x + offset, y + offset), shadow)
+    page.paste(shadow, (x + dx, y + dy), shadow)
     page.paste(card, (x, y), card)
 
 
@@ -184,8 +192,8 @@ def build_pdf(
     page_size: str = "a4",
     grayscale: bool = False,
     same_page: bool = False,
-    tilt_min: float = 5.0,
-    tilt_max: float = 10.0,
+    tilt_min: float = 3.0,
+    tilt_max: float = 8.0,
     grain: float = 5.0,
     scan_dpi: float = 100.0,
 ):
@@ -235,8 +243,8 @@ def batch_convert_folder(
     dpi: int = 300,
     page_size: str = "a4",
     grayscale: bool = False,
-    tilt_min: float = 5.0,
-    tilt_max: float = 10.0,
+    tilt_min: float = 3.0,
+    tilt_max: float = 8.0,
     grain: float = 5.0,
     scan_dpi: float = 100.0,
 ):
@@ -291,8 +299,8 @@ def parse_args(argv=None):
         action="store_true",
         help="Place all images (e.g. front and back) on a single page instead of one page each",
     )
-    parser.add_argument("--tilt-min", type=float, default=5.0, help="Minimum random tilt angle in degrees (default: 5.0)")
-    parser.add_argument("--tilt-max", type=float, default=10.0, help="Maximum random tilt angle in degrees, left or right (default: 10.0, 0 to disable tilt)")
+    parser.add_argument("--tilt-min", type=float, default=3.0, help="Minimum random tilt angle in degrees (default: 3.0)")
+    parser.add_argument("--tilt-max", type=float, default=8.0, help="Maximum random tilt angle in degrees, left or right (default: 8.0, 0 to disable tilt)")
     parser.add_argument("--grain", type=float, default=5.0, help="Scan grain/noise intensity (default: 5.0, 0 to disable)")
     parser.add_argument(
         "--scan-dpi",
