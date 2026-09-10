@@ -55,6 +55,10 @@ SHADOW_SCALE_RANGE = (0.95, 1.1)  # independent random x/y scale of the silhouet
 SHADOW_NOISE_GRID = 14  # coarse grid resolution the noise is generated at
 SHADOW_NOISE_AMPLITUDE = 70  # 0-255
 SHADOW_MAX_SPREAD_FRACTION = 0.05
+# All shadow-mask math (including the MaxFilter dilation) runs on a copy of
+# the card downscaled to at most this width, keeping shadow generation fast
+# regardless of the source photo's resolution.
+SHADOW_MASK_WORK_SIZE = 400
 
 # A separate, broader shading pass covering the whole page: soft, uneven
 # patches of darkness (like an unevenly lit scanner bed or dirty glass),
@@ -74,7 +78,10 @@ def load_image(path: str) -> Image.Image:
 def add_scan_grain(img: Image.Image, amount: float = 6.0) -> Image.Image:
     """Add subtle Gaussian noise so the page doesn't look like a raw digital photo."""
     arr = np.asarray(img).astype(np.int16)
-    noise = np.random.normal(0, amount, arr.shape)
+    # One noise value per pixel, broadcast across channels, instead of one
+    # per channel: ~3x less random-number generation at full photo
+    # resolution, with no visible difference in the result.
+    noise = np.random.normal(0, amount, arr.shape[:2] + (1,))
     arr = np.clip(arr + noise, 0, 255).astype(np.uint8)
     return Image.fromarray(arr)
 
@@ -151,28 +158,39 @@ def make_irregular_shadow_mask(alpha: Image.Image) -> Image.Image:
     """Turn the card's (possibly tilted) alpha silhouette into an irregular
     blob: scale it non-uniformly on x/y, then perturb it with coarse random
     noise, so the shadow reads as an uneven soft shape rather than a clean
-    duplicate of the card's rectangle."""
+    duplicate of the card's rectangle.
+
+    All of this runs on a small downscaled copy of the mask (MaxFilter's
+    rank filter is O(kernel_area) per pixel, so running it at full photo
+    resolution with a wide kernel is extremely slow); the result is
+    upsampled back to the card's actual size at the end."""
+    work_w = min(alpha.width, SHADOW_MASK_WORK_SIZE)
+    work_h = max(1, round(alpha.height * work_w / alpha.width))
+    small_alpha = alpha.resize((work_w, work_h), Image.BILINEAR)
+
     scale_x = random.uniform(*SHADOW_SCALE_RANGE)
     scale_y = random.uniform(*SHADOW_SCALE_RANGE)
-    scaled_w = max(1, int(alpha.width * scale_x))
-    scaled_h = max(1, int(alpha.height * scale_y))
-    scaled = alpha.resize((scaled_w, scaled_h), Image.BILINEAR)
+    scaled_w = max(1, int(work_w * scale_x))
+    scaled_h = max(1, int(work_h * scale_y))
+    scaled = small_alpha.resize((scaled_w, scaled_h), Image.BILINEAR)
 
-    canvas = Image.new("L", alpha.size, 0)
-    canvas.paste(scaled, ((alpha.width - scaled_w) // 2, (alpha.height - scaled_h) // 2))
+    canvas = Image.new("L", (work_w, work_h), 0)
+    canvas.paste(scaled, ((work_w - scaled_w) // 2, (work_h - scaled_h) // 2))
 
     grid = max(4, SHADOW_NOISE_GRID)
     small = canvas.resize((grid, grid), Image.BILINEAR)
     arr = np.asarray(small).astype(np.int16)
     noise = np.random.uniform(-SHADOW_NOISE_AMPLITUDE, SHADOW_NOISE_AMPLITUDE, arr.shape)
     noisy_small = Image.fromarray(np.clip(arr + noise, 0, 255).astype(np.uint8), mode="L")
-    noisy = noisy_small.resize(alpha.size, Image.BILINEAR)
+    noisy = noisy_small.resize((work_w, work_h), Image.BILINEAR)
 
     # Bound the noisy shape to a modestly dilated version of the card's own
     # silhouette, so it can't sweep far past the card's edge.
-    margin = min(101, max(3, int(alpha.width * SHADOW_MAX_SPREAD_FRACTION)) | 1)
-    allowed_extent = alpha.filter(ImageFilter.MaxFilter(margin))
-    return ImageChops.multiply(noisy, allowed_extent)
+    margin = max(3, int(work_w * SHADOW_MAX_SPREAD_FRACTION)) | 1
+    allowed_extent = small_alpha.filter(ImageFilter.MaxFilter(margin))
+    bounded = ImageChops.multiply(noisy, allowed_extent)
+
+    return bounded.resize(alpha.size, Image.BILINEAR)
 
 
 def paste_card_with_shadow(page: Image.Image, card: Image.Image, x: int, y: int) -> None:
