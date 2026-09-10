@@ -42,12 +42,17 @@ SHARP_REFERENCE_DPI = 300.0
 # than two visually distinct effects.
 SHADOW_COLOR = (40, 40, 40)
 
-# Drop shadow behind the tilted card, randomized within these ranges (sized
-# relative to the card's own width) so each card reads as a physical object
-# placed on the page rather than a flat rotated cutout, with natural
-# card-to-card variation instead of one identical shadow every time.
+# Drop shadow behind the tilted card, randomized within these ranges so each
+# card reads as a physical object placed on the page rather than a flat
+# rotated cutout, with natural card-to-card variation instead of one
+# identical shadow every time. The offset (how far the shadow is pushed from
+# the card) is sized relative to the card, but the blur is sized relative to
+# the PAGE's longer side, matching PAGE_SHADING_BLUR_FRACTION's scale below —
+# otherwise the card shadow reads as a small tight blob next to a much
+# softer, broader page-wide wash, i.e. two visually distinct effects instead
+# of one light source.
 SHADOW_OFFSET_FRACTION_RANGE = (0.006, 0.018)
-SHADOW_BLUR_FRACTION_RANGE = (0.015, 0.03)
+SHADOW_BLUR_FRACTION_RANGE = (0.02, 0.045)
 SHADOW_OPACITY_RANGE = (50, 120)  # 0-255
 
 # The shadow silhouette is a distorted, non-uniformly scaled, noisy version
@@ -55,11 +60,11 @@ SHADOW_OPACITY_RANGE = (50, 120)  # 0-255
 # it reads as an irregular soft shadow instead of a duplicated card shape.
 # SHADOW_MAX_SPREAD_FRACTION caps how far that noise can push the shadow
 # beyond the card's edge, so it stays a shadow hugging the card rather than
-# a gradient sweeping across the page.
+# a gradient sweeping arbitrarily far across the page.
 SHADOW_SCALE_RANGE = (0.95, 1.1)  # independent random x/y scale of the silhouette
 SHADOW_NOISE_GRID = 14  # coarse grid resolution the noise is generated at
-SHADOW_NOISE_AMPLITUDE = 70  # 0-255
-SHADOW_MAX_SPREAD_FRACTION = 0.05
+SHADOW_NOISE_AMPLITUDE = 45  # 0-255; lower than before for smoother, less patchy edges
+SHADOW_MAX_SPREAD_FRACTION = 0.08
 # All shadow-mask math (including the MaxFilter dilation) runs on a copy of
 # the card downscaled to at most this width, keeping shadow generation fast
 # regardless of the source photo's resolution.
@@ -212,14 +217,24 @@ def paste_card_with_shadow(page: Image.Image, card: Image.Image, x: int, y: int)
     dx = int(round(offset_magnitude * math.cos(direction)))
     dy = int(round(offset_magnitude * math.sin(direction)))
 
-    blur_radius = max(1.0, random.uniform(*SHADOW_BLUR_FRACTION_RANGE) * card.width)
+    # Blur radius is sized relative to the page, not the card, and the
+    # shadow canvas is padded well beyond the card's own bounding box so
+    # that blur can actually spread outward instead of being clipped at the
+    # card's edges - otherwise a wide blur radius has nowhere to go and the
+    # shadow still ends up looking like a tight blob.
+    blur_radius = max(1.0, random.uniform(*SHADOW_BLUR_FRACTION_RANGE) * max(page.width, page.height))
     opacity = random.uniform(*SHADOW_OPACITY_RANGE)
 
-    shadow = Image.new("RGBA", card.size, SHADOW_COLOR + (0,))
-    shadow.putalpha(shadow_mask.point(lambda a: int(a * opacity / 255)))
+    pad = int(blur_radius * 3) + 1
+    padded_size = (card.width + 2 * pad, card.height + 2 * pad)
+    padded_mask = Image.new("L", padded_size, 0)
+    padded_mask.paste(shadow_mask, (pad, pad))
+
+    shadow = Image.new("RGBA", padded_size, SHADOW_COLOR + (0,))
+    shadow.putalpha(padded_mask.point(lambda a: int(a * opacity / 255)))
     shadow = shadow.filter(ImageFilter.GaussianBlur(radius=blur_radius))
 
-    page.paste(shadow, (x + dx, y + dy), shadow)
+    page.paste(shadow, (x - pad + dx, y - pad + dy), shadow)
     page.paste(card, (x, y), card)
 
 
