@@ -24,7 +24,7 @@ import random
 import sys
 
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
 
 PAGE_SIZES_MM = {
     "a4": (210, 297),
@@ -44,6 +44,17 @@ SHARP_REFERENCE_DPI = 300.0
 SHADOW_OFFSET_FRACTION_RANGE = (0.006, 0.018)
 SHADOW_BLUR_FRACTION_RANGE = (0.015, 0.03)
 SHADOW_OPACITY_RANGE = (50, 120)  # 0-255
+
+# The shadow silhouette is a distorted, non-uniformly scaled, noisy version
+# of the card's own outline rather than an exact rectangular copy of it, so
+# it reads as an irregular soft shadow instead of a duplicated card shape.
+# SHADOW_MAX_SPREAD_FRACTION caps how far that noise can push the shadow
+# beyond the card's edge, so it stays a shadow hugging the card rather than
+# a gradient sweeping across the page.
+SHADOW_SCALE_RANGE = (0.95, 1.1)  # independent random x/y scale of the silhouette
+SHADOW_NOISE_GRID = 14  # coarse grid resolution the noise is generated at
+SHADOW_NOISE_AMPLITUDE = 70  # 0-255
+SHADOW_MAX_SPREAD_FRACTION = 0.05
 
 
 def load_image(path: str) -> Image.Image:
@@ -128,12 +139,42 @@ def mm_to_px(mm: float, dpi: int) -> int:
     return int(round(mm / 25.4 * dpi))
 
 
+def make_irregular_shadow_mask(alpha: Image.Image) -> Image.Image:
+    """Turn the card's (possibly tilted) alpha silhouette into an irregular
+    blob: scale it non-uniformly on x/y, then perturb it with coarse random
+    noise, so the shadow reads as an uneven soft shape rather than a clean
+    duplicate of the card's rectangle."""
+    scale_x = random.uniform(*SHADOW_SCALE_RANGE)
+    scale_y = random.uniform(*SHADOW_SCALE_RANGE)
+    scaled_w = max(1, int(alpha.width * scale_x))
+    scaled_h = max(1, int(alpha.height * scale_y))
+    scaled = alpha.resize((scaled_w, scaled_h), Image.BILINEAR)
+
+    canvas = Image.new("L", alpha.size, 0)
+    canvas.paste(scaled, ((alpha.width - scaled_w) // 2, (alpha.height - scaled_h) // 2))
+
+    grid = max(4, SHADOW_NOISE_GRID)
+    small = canvas.resize((grid, grid), Image.BILINEAR)
+    arr = np.asarray(small).astype(np.int16)
+    noise = np.random.uniform(-SHADOW_NOISE_AMPLITUDE, SHADOW_NOISE_AMPLITUDE, arr.shape)
+    noisy_small = Image.fromarray(np.clip(arr + noise, 0, 255).astype(np.uint8), mode="L")
+    noisy = noisy_small.resize(alpha.size, Image.BILINEAR)
+
+    # Bound the noisy shape to a modestly dilated version of the card's own
+    # silhouette, so it can't sweep far past the card's edge.
+    margin = min(101, max(3, int(alpha.width * SHADOW_MAX_SPREAD_FRACTION)) | 1)
+    allowed_extent = alpha.filter(ImageFilter.MaxFilter(margin))
+    return ImageChops.multiply(noisy, allowed_extent)
+
+
 def paste_card_with_shadow(page: Image.Image, card: Image.Image, x: int, y: int) -> None:
     """Paste an RGBA (possibly tilted, transparent-cornered) card onto the
-    page with a soft drop shadow, so it reads as a card placed on a scanner
-    rather than a flat rotated cutout. The shadow's direction, offset, blur,
-    and opacity are all randomized per card for natural variation."""
+    page with a soft, irregularly-shaped drop shadow, so it reads as a card
+    placed on a scanner rather than a flat rotated cutout. The shadow's
+    shape, direction, offset, blur, and opacity are all randomized per card
+    for natural variation."""
     alpha = card.split()[-1]
+    shadow_mask = make_irregular_shadow_mask(alpha)
 
     offset_magnitude = random.uniform(*SHADOW_OFFSET_FRACTION_RANGE) * card.width
     direction = random.uniform(0, 2 * math.pi)
@@ -144,7 +185,7 @@ def paste_card_with_shadow(page: Image.Image, card: Image.Image, x: int, y: int)
     opacity = random.uniform(*SHADOW_OPACITY_RANGE)
 
     shadow = Image.new("RGBA", card.size, (40, 40, 40, 0))
-    shadow.putalpha(alpha.point(lambda a: int(a * opacity / 255)))
+    shadow.putalpha(shadow_mask.point(lambda a: int(a * opacity / 255)))
     shadow = shadow.filter(ImageFilter.GaussianBlur(radius=blur_radius))
 
     page.paste(shadow, (x + dx, y + dy), shadow)
