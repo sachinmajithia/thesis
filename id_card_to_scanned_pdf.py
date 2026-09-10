@@ -8,7 +8,7 @@ Usage:
     # Combine explicit files into one PDF
     python id_card_to_scanned_pdf.py front.jpg back.jpg -o id_card_scan.pdf
     python id_card_to_scanned_pdf.py front.jpg back.jpg --same-page
-    python id_card_to_scanned_pdf.py *.jpg --color --page-size letter
+    python id_card_to_scanned_pdf.py *.jpg --grayscale --page-size letter
 
     # Batch mode: pick every image in a folder and write one PDF per image,
     # each PDF named after its source image (front.jpg -> front.pdf)
@@ -30,6 +30,10 @@ PAGE_SIZES_MM = {
 }
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+
+# Gaussian blur radius at 100% is this fraction of the card's own width, so
+# "blur percent" scales with the card regardless of source photo resolution.
+BLUR_RADIUS_FRACTION = 0.02
 
 
 def load_image(path: str) -> Image.Image:
@@ -54,19 +58,38 @@ def deskew(img: Image.Image, angle: float) -> Image.Image:
     )
 
 
+def random_tilt_angle(min_degrees: float, max_degrees: float) -> float:
+    """Pick a random tilt magnitude in [min_degrees, max_degrees] and a random
+    left/right direction. Returns 0 if the range is disabled (max <= 0)."""
+    if max_degrees <= 0:
+        return 0.0
+    magnitude = random.uniform(min_degrees, max_degrees)
+    return magnitude if random.random() < 0.5 else -magnitude
+
+
+def apply_blur(img: Image.Image, blur_percent: float) -> Image.Image:
+    """Blur the card by a percentage of its own width (0-100+)."""
+    if not blur_percent:
+        return img
+    radius = (blur_percent / 100.0) * img.width * BLUR_RADIUS_FRACTION
+    return img.filter(ImageFilter.GaussianBlur(radius=radius))
+
+
 def apply_scan_look(
     img: Image.Image,
-    grayscale: bool = True,
-    jitter_angle: float = 1.0,
+    grayscale: bool = False,
+    tilt_min: float = 5.0,
+    tilt_max: float = 10.0,
     contrast: float = 1.25,
     brightness: float = 1.08,
     sharpen: bool = True,
     grain: float = 5.0,
+    blur: float = 55.0,
 ) -> Image.Image:
     """Process a single ID card photo to resemble a scanned card."""
     processed = img
 
-    angle = random.uniform(-jitter_angle, jitter_angle) if jitter_angle else 0
+    angle = random_tilt_angle(tilt_min, tilt_max)
     processed = deskew(processed, angle)
 
     if grayscale:
@@ -77,6 +100,9 @@ def apply_scan_look(
 
     if sharpen:
         processed = processed.filter(ImageFilter.UnsharpMask(radius=2, percent=60))
+
+    if blur:
+        processed = apply_blur(processed, blur)
 
     if grain:
         processed = add_scan_grain(processed, amount=grain)
@@ -127,10 +153,12 @@ def build_pdf(
     output_path: str,
     dpi: int = 300,
     page_size: str = "a4",
-    grayscale: bool = True,
+    grayscale: bool = False,
     same_page: bool = False,
-    jitter_angle: float = 1.0,
+    tilt_min: float = 5.0,
+    tilt_max: float = 10.0,
     grain: float = 5.0,
+    blur: float = 55.0,
 ):
     if page_size not in PAGE_SIZES_MM:
         raise ValueError(f"Unknown page size '{page_size}'. Choose from {list(PAGE_SIZES_MM)}")
@@ -140,8 +168,10 @@ def build_pdf(
         apply_scan_look(
             load_image(path),
             grayscale=grayscale,
-            jitter_angle=jitter_angle,
+            tilt_min=tilt_min,
+            tilt_max=tilt_max,
             grain=grain,
+            blur=blur,
         )
         for path in input_paths
     ]
@@ -175,9 +205,11 @@ def batch_convert_folder(
     output_dir: str,
     dpi: int = 300,
     page_size: str = "a4",
-    grayscale: bool = True,
-    jitter_angle: float = 1.0,
+    grayscale: bool = False,
+    tilt_min: float = 5.0,
+    tilt_max: float = 10.0,
     grain: float = 5.0,
+    blur: float = 55.0,
 ):
     """Convert every image in input_dir into its own scanned-style PDF,
     named after the source image, written into output_dir."""
@@ -198,8 +230,10 @@ def batch_convert_folder(
             page_size=page_size,
             grayscale=grayscale,
             same_page=False,
-            jitter_angle=jitter_angle,
+            tilt_min=tilt_min,
+            tilt_max=tilt_max,
             grain=grain,
+            blur=blur,
         )
         output_paths.append(output_path)
 
@@ -222,17 +256,17 @@ def parse_args(argv=None):
     )
     parser.add_argument("--dpi", type=int, default=300, help="Output resolution in DPI (default: 300)")
     parser.add_argument("--page-size", choices=list(PAGE_SIZES_MM), default="a4", help="Output page size")
-    parser.add_argument("--color", action="store_true", help="Keep color instead of converting to grayscale")
+    parser.add_argument("--grayscale", action="store_true", help="Convert to grayscale instead of keeping color (default: color)")
     parser.add_argument(
         "--same-page",
         action="store_true",
         help="Place all images (e.g. front and back) on a single page instead of one page each",
     )
-    parser.add_argument(
-        "--jitter", type=float, default=1.0, help="Max random skew angle in degrees to mimic a hand-placed scan (default: 1.0, 0 to disable)"
-    )
+    parser.add_argument("--tilt-min", type=float, default=5.0, help="Minimum random tilt angle in degrees (default: 5.0)")
+    parser.add_argument("--tilt-max", type=float, default=10.0, help="Maximum random tilt angle in degrees, left or right (default: 10.0, 0 to disable tilt)")
     parser.add_argument("--grain", type=float, default=5.0, help="Scan grain/noise intensity (default: 5.0, 0 to disable)")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible skew/grain")
+    parser.add_argument("--blur", type=float, default=55.0, help="Blur intensity as a percentage of card width (default: 55.0, 0 to disable)")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible tilt/grain")
     return parser.parse_args(argv)
 
 
@@ -250,9 +284,11 @@ def main(argv=None):
             output_dir=output_dir,
             dpi=args.dpi,
             page_size=args.page_size,
-            grayscale=not args.color,
-            jitter_angle=args.jitter,
+            grayscale=args.grayscale,
+            tilt_min=args.tilt_min,
+            tilt_max=args.tilt_max,
             grain=args.grain,
+            blur=args.blur,
         )
         print(f"Saved {len(output_paths)} scanned-style PDF(s) to {output_dir}:")
         for path in output_paths:
@@ -264,10 +300,12 @@ def main(argv=None):
         output_path=args.output,
         dpi=args.dpi,
         page_size=args.page_size,
-        grayscale=not args.color,
+        grayscale=args.grayscale,
         same_page=args.same_page,
-        jitter_angle=args.jitter,
+        tilt_min=args.tilt_min,
+        tilt_max=args.tilt_max,
         grain=args.grain,
+        blur=args.blur,
     )
     print(f"Saved scanned-style PDF to {args.output}")
 
