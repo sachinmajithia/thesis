@@ -1172,8 +1172,13 @@ def search_internet_google(query: str, max_results: int = 30, use_sentence_searc
             sentence_searcher = model_cache['sentence_searcher']
             search_queries = sentence_searcher.create_sentence_queries(query, num_queries=5)
 
-        all_matches = []
-        seen_urls = set()
+        # Each sentence is searched independently, so the same source URL can
+        # turn up under several different sentence queries. Instead of
+        # listing that source once per matching sentence, combine those hits
+        # into a single entry: keep the highest similarity score seen for
+        # that URL, and record how many of the input's sentences matched it.
+        best_by_url: Dict[str, Dict] = {}
+        match_counts: Dict[str, int] = {}
 
         # Perform searches for each sentence
         for i, search_query in enumerate(search_queries, 1):
@@ -1181,15 +1186,25 @@ def search_internet_google(query: str, max_results: int = 30, use_sentence_searc
             matches = _perform_google_search(search_query, max_results // len(search_queries) + 2)
 
             for match in matches:
-                url = match['url']
-                if url not in seen_urls:  # Avoid duplicates
-                    seen_urls.add(url)
-                    all_matches.append(match)
+                url = match.get('url')
+                if not url:
+                    continue
+                match_counts[url] = match_counts.get(url, 0) + 1
+                existing = best_by_url.get(url)
+                if existing is None or match['similarity'] > existing['similarity']:
+                    best_by_url[url] = match
 
-        # Sort by similarity and return top results
+        all_matches = []
+        for url, match in best_by_url.items():
+            match = dict(match)
+            match['matched_sentence_count'] = match_counts[url]
+            all_matches.append(match)
+
+        # Sort by (combined, maximum) similarity and return top results
         all_matches.sort(key=lambda x: x['similarity'], reverse=True)
 
-        print(f"\n✅ Internet search completed: {len(all_matches)} unique results found")
+        print(f"\n✅ Internet search completed: {len(all_matches)} unique sources found "
+              f"(from {len(search_queries)} sentence queries)")
         return all_matches[:max_results]
 
     except Exception as e:
@@ -1208,10 +1223,11 @@ def search_internet_bilingual(
       - original Hindi text
       - translated Punjabi text
 
-    Results are merged and deduplicated by URL.
+    Results are merged and deduplicated by URL, keeping the higher-similarity
+    hit (rather than whichever language happened to find it first) so the
+    same source is never listed twice.
     """
-    all_matches: List[Dict] = []
-    seen_urls = set()
+    best_by_url: Dict[str, Dict] = {}
 
     # 1) Search with original Hindi text
     if hindi_text and hindi_text.strip():
@@ -1223,12 +1239,13 @@ def search_internet_bilingual(
         )
         for m in hindi_matches:
             url = m.get("url")
-            if not url or url in seen_urls:
+            if not url:
                 continue
-            seen_urls.add(url)
             m = dict(m)
             m["query_language"] = "hindi"
-            all_matches.append(m)
+            existing = best_by_url.get(url)
+            if existing is None or m.get("similarity", 0.0) > existing.get("similarity", 0.0):
+                best_by_url[url] = m
 
     # 2) Search with translated Punjabi text
     if translated_punjabi and translated_punjabi.strip():
@@ -1240,16 +1257,17 @@ def search_internet_bilingual(
         )
         for m in punjabi_matches:
             url = m.get("url")
-            if not url or url in seen_urls:
+            if not url:
                 continue
-            seen_urls.add(url)
             m = dict(m)
             m["query_language"] = "punjabi"
-            all_matches.append(m)
+            existing = best_by_url.get(url)
+            if existing is None or m.get("similarity", 0.0) > existing.get("similarity", 0.0):
+                best_by_url[url] = m
 
-    # Sort combined list by similarity and trim
-    all_matches.sort(key=lambda x: x.get("similarity", 0.0), reverse=True)
-    print(f"\n✅ Bilingual internet search complete: {len(all_matches)} unique results")
+    # Sort combined list by (maximum) similarity and trim
+    all_matches = sorted(best_by_url.values(), key=lambda x: x.get("similarity", 0.0), reverse=True)
+    print(f"\n✅ Bilingual internet search complete: {len(all_matches)} unique sources")
     return all_matches[:max_results]
 
 def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
