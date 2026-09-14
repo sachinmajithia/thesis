@@ -1098,6 +1098,48 @@ class EnhancedCorpusManager:
             print(f"❌ Corpus search error: {e}")
             return []
 
+    def search_corpus_bilingual(
+        self,
+        hindi_text: str,
+        translated_punjabi: str,
+        top_k: int = 10,
+        threshold: float = 0.55
+    ) -> List[Dict]:
+        """
+        Search the corpus using BOTH:
+          - the original Hindi source document
+          - its translated Punjabi version
+
+        A corpus document is matched if it is similar to either query, so a
+        plagiarized source is caught whether the corpus copy was kept in
+        Hindi or already translated to Punjabi. Results are merged and
+        deduplicated by filename, keeping the higher-similarity hit and
+        tagging which query language produced it.
+        """
+        merged: Dict[str, Dict] = {}
+
+        if hindi_text and hindi_text.strip():
+            print("\n📚 CORPUS SEARCH: ORIGINAL HINDI SOURCE DOCUMENT")
+            for m in self.search_corpus(hindi_text, top_k=top_k, threshold=threshold):
+                m = dict(m)
+                m['query_language'] = 'hindi'
+                existing = merged.get(m['filename'])
+                if existing is None or m['similarity'] > existing['similarity']:
+                    merged[m['filename']] = m
+
+        if translated_punjabi and translated_punjabi.strip():
+            print("\n📚 CORPUS SEARCH: TRANSLATED PUNJABI VERSION")
+            for m in self.search_corpus(translated_punjabi, top_k=top_k, threshold=threshold):
+                m = dict(m)
+                m['query_language'] = 'punjabi'
+                existing = merged.get(m['filename'])
+                if existing is None or m['similarity'] > existing['similarity']:
+                    merged[m['filename']] = m
+
+        results = sorted(merged.values(), key=lambda x: x['similarity'], reverse=True)
+        print(f"✅ Bilingual corpus search complete: {len(results)} unique document matches")
+        return results[:top_k]
+
 # ============================================================================
 # 5. ENHANCED INTERNET SEARCH WITH SENTENCE-BASED APPROACH
 # ============================================================================
@@ -1602,17 +1644,31 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     translated_punjabi = both_modes['recommended']['translation']
     translation_method = both_modes['recommended']['method']
 
-    # =========== STEP 2: CORPUS PLAGIARISM CHECK ===========
-    print("\n[STEP 2] CROSS-LANGUAGE PLAGIARISM CHECK - CORPUS")
+    # =========== STEP 2: CORPUS PLAGIARISM CHECK (BILINGUAL) ===========
+    # Compares the original Hindi source document AND its translated
+    # Punjabi version against the corpus, so a match is caught whether the
+    # corpus copy of the source is still in Hindi or already in Punjabi.
+    print("\n[STEP 2] CROSS-LANGUAGE PLAGIARISM CHECK - CORPUS (HINDI + PUNJABI)")
     print("-" * 80)
 
-    corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
+    corpus_matches = corpus_manager.search_corpus_bilingual(
+        hindi_text, translated_punjabi, top_k=10, threshold=0.55
+    )
+    corpus_matches_hindi = [m for m in corpus_matches if m.get('query_language') == 'hindi']
+    corpus_matches_punjabi = [m for m in corpus_matches if m.get('query_language') == 'punjabi']
 
-    # =========== STEP 3: INTERNET SEARCH (GOOGLE) WITH SENTENCE-BASED APPROACH ===========
-    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED FOR TRANSLATED CONTENT")
+    # =========== STEP 3: INTERNET SEARCH (GOOGLE) - ORIGINAL HINDI + TRANSLATED PUNJABI ===========
+    # Searches the internet with BOTH the original Hindi source document and
+    # its Punjabi translation, each carrying its own similarity %, instead
+    # of only searching the translated text.
+    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED, HINDI SOURCE + PUNJABI TRANSLATION")
     print("-" * 80)
 
-    internet_matches = search_internet_google(translated_punjabi, max_results=30, use_sentence_search=use_sentence_search)
+    internet_matches = search_internet_bilingual(
+        hindi_text, translated_punjabi, max_results=30, use_sentence_search=use_sentence_search
+    )
+    internet_matches_hindi = [m for m in internet_matches if m.get('query_language') == 'hindi']
+    internet_matches_punjabi = [m for m in internet_matches if m.get('query_language') == 'punjabi']
 
     #=========== PREPARE RESPONSE ===========
     processing_time = (datetime.now() - start_time).total_seconds()
@@ -1626,18 +1682,30 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
         # final output is not limited to a single cascade winner.
         'translation_modes': both_modes,
 
-        # Corpus Results
+        # Corpus Results - searched with both the original Hindi source
+        # document and its translated Punjabi version.
         'corpus_results': {
             'total_matches': len(corpus_matches),
             'matches': corpus_matches[:5],
-            'max_similarity': max([m['similarity'] for m in corpus_matches], default=0)
+            'max_similarity': max([m['similarity'] for m in corpus_matches], default=0),
+            'hindi_matches': len(corpus_matches_hindi),
+            'punjabi_matches': len(corpus_matches_punjabi),
+            'max_similarity_hindi': max([m['similarity'] for m in corpus_matches_hindi], default=0),
+            'max_similarity_punjabi': max([m['similarity'] for m in corpus_matches_punjabi], default=0),
+            'compared_against': ['original_hindi_source', 'translated_punjabi']
         },
 
-        # Internet Results
+        # Internet Results - searched with both the original Hindi source
+        # document and its translated Punjabi version, each with its own
+        # similarity %.
         'internet_results': {
             'total_matches': len(internet_matches),
             'matches': internet_matches[:40],
             'max_similarity': max([m['similarity'] for m in internet_matches], default=0),
+            'hindi_matches': len(internet_matches_hindi),
+            'punjabi_matches': len(internet_matches_punjabi),
+            'max_similarity_hindi': max([m['similarity'] for m in internet_matches_hindi], default=0),
+            'max_similarity_punjabi': max([m['similarity'] for m in internet_matches_punjabi], default=0),
             'search_method': 'sentence-based' if use_sentence_search else 'keyword-based'
         },
 
@@ -1648,6 +1716,8 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'internet_matches': len(internet_matches),
             'highest_corpus_similarity': max([m['similarity'] for m in corpus_matches], default=0),
             'highest_internet_similarity': max([m['similarity'] for m in internet_matches], default=0),
+            'highest_internet_similarity_hindi': max([m['similarity'] for m in internet_matches_hindi], default=0),
+            'highest_internet_similarity_punjabi': max([m['similarity'] for m in internet_matches_punjabi], default=0),
             'overall_similarity': max(
                 max([m['similarity'] for m in corpus_matches], default=0),
                 max([m['similarity'] for m in internet_matches], default=0)
