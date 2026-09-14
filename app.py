@@ -71,6 +71,11 @@ os.makedirs(app.config['CORPUS_FOLDER'], exist_ok=True)
 FINETUNED_INDICBERT_PATH = os.path.join('models', 'indicbert-finetuned-hi-pa')
 PRETRAINED_SEMANTIC_MODEL = 'l3cube-pune/indic-sentence-similarity-sbert'
 
+# Only surface a corpus/internet result as a plagiarism match once its
+# similarity reaches this threshold - keeps the UI focused on strong,
+# high-confidence matches instead of every low-similarity hit.
+PLAGIARISM_SIMILARITY_THRESHOLD = 0.80
+
 model_cache = {}
 corpus_cache = {
     'documents': [],
@@ -1034,7 +1039,7 @@ class EnhancedCorpusManager:
         except Exception as e:
             print(f"❌ Cache refresh error: {e}")
 
-    def search_corpus(self, query: str, top_k: int = 5, threshold: float = 0.55) -> List[Dict]:
+    def search_corpus(self, query: str, top_k: int = 5, threshold: float = PLAGIARISM_SIMILARITY_THRESHOLD) -> List[Dict]:
         """Search corpus for plagiarism matches"""
         try:
             print(f"\n🔍 Searching corpus for plagiarism...")
@@ -1103,7 +1108,7 @@ class EnhancedCorpusManager:
         hindi_text: str,
         translated_punjabi: str,
         top_k: int = 10,
-        threshold: float = 0.55
+        threshold: float = PLAGIARISM_SIMILARITY_THRESHOLD
     ) -> List[Dict]:
         """
         Search the corpus using BOTH:
@@ -1652,7 +1657,7 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     print("-" * 80)
 
     corpus_matches = corpus_manager.search_corpus_bilingual(
-        hindi_text, translated_punjabi, top_k=10, threshold=0.55
+        hindi_text, translated_punjabi, top_k=10, threshold=PLAGIARISM_SIMILARITY_THRESHOLD
     )
     corpus_matches_hindi = [m for m in corpus_matches if m.get('query_language') == 'hindi']
     corpus_matches_punjabi = [m for m in corpus_matches if m.get('query_language') == 'punjabi']
@@ -1667,6 +1672,9 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     internet_matches = search_internet_bilingual(
         hindi_text, translated_punjabi, max_results=30, use_sentence_search=use_sentence_search
     )
+    # Only surface internet matches above the same similarity threshold as
+    # the corpus check, instead of showing every result the search returned.
+    internet_matches = [m for m in internet_matches if m.get('similarity', 0) >= PLAGIARISM_SIMILARITY_THRESHOLD]
     internet_matches_hindi = [m for m in internet_matches if m.get('query_language') == 'hindi']
     internet_matches_punjabi = [m for m in internet_matches if m.get('query_language') == 'punjabi']
 
