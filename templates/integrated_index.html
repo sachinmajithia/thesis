@@ -470,11 +470,11 @@ function renderPlagiarismResult(data) {
   html += `</div>`;
 
   html += `<div class="card"><h2>Internet Matches (${internet.total_matches}) ${badge(internet.search_method, 'blue')}</h2>
-    <p style="font-size:12.5px;color:var(--muted);margin-top:-6px;">Searched the internet using both the original Hindi source document (${internet.hindi_matches || 0} matches) and its translated Punjabi version (${internet.punjabi_matches || 0} matches). Only matches above 80% similarity are shown.</p>`;
+    <p style="font-size:12.5px;color:var(--muted);margin-top:-6px;">Searched the internet sentence-by-sentence using both the original Hindi source document (${internet.hindi_matches || 0} matches, filtered to ≥80% similarity) and its translated Punjabi version (${internet.punjabi_matches || 0} matches, no similarity threshold).</p>`;
   if (internet.matches && internet.matches.length) {
     html += internet.matches.slice(0, 15).map(renderInternetMatch).join('');
   } else {
-    html += `<div class="empty-state">No internet matches above 80% similarity.</div>`;
+    html += `<div class="empty-state">No internet matches found.</div>`;
   }
   html += `</div>`;
 

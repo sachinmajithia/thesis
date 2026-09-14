@@ -1216,12 +1216,20 @@ def search_internet_bilingual(
     hindi_text: str,
     translated_punjabi: str,
     max_results: int = 30,
-    use_sentence_search: bool = True
+    use_sentence_search: bool = True,
+    hindi_similarity_threshold: Optional[float] = None
 ) -> List[Dict]:
     """
     Search the internet using BOTH:
       - original Hindi text
       - translated Punjabi text
+
+    Both legs are searched sentence-by-sentence (when use_sentence_search is
+    on). The Hindi leg is filtered to hindi_similarity_threshold, when given,
+    so only strong matches for the original source surface. The Punjabi
+    (translated) leg is intentionally left unfiltered - every sentence-based
+    hit is kept, however low its similarity, since the translation quality
+    itself can suppress similarity scores that would otherwise be relevant.
 
     Results are merged and deduplicated by URL, keeping the higher-similarity
     hit (rather than whichever language happened to find it first) so the
@@ -1229,7 +1237,7 @@ def search_internet_bilingual(
     """
     best_by_url: Dict[str, Dict] = {}
 
-    # 1) Search with original Hindi text
+    # 1) Search with original Hindi text - filtered to the similarity threshold
     if hindi_text and hindi_text.strip():
         print("\n🌐 INTERNET SEARCH: ORIGINAL HINDI TEXT")
         hindi_matches = search_internet_google(
@@ -1237,6 +1245,8 @@ def search_internet_bilingual(
             max_results=max_results,
             use_sentence_search=use_sentence_search
         )
+        if hindi_similarity_threshold is not None:
+            hindi_matches = [m for m in hindi_matches if m.get('similarity', 0.0) >= hindi_similarity_threshold]
         for m in hindi_matches:
             url = m.get("url")
             if not url:
@@ -1247,9 +1257,9 @@ def search_internet_bilingual(
             if existing is None or m.get("similarity", 0.0) > existing.get("similarity", 0.0):
                 best_by_url[url] = m
 
-    # 2) Search with translated Punjabi text
+    # 2) Search with translated Punjabi text - sentence-wise, no threshold
     if translated_punjabi and translated_punjabi.strip():
-        print("\n🌐 INTERNET SEARCH: TRANSLATED PUNJABI TEXT")
+        print("\n🌐 INTERNET SEARCH: TRANSLATED PUNJABI TEXT (no similarity threshold)")
         punjabi_matches = search_internet_google(
             translated_punjabi,
             max_results=max_results,
@@ -1683,16 +1693,17 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     # =========== STEP 3: INTERNET SEARCH (GOOGLE) - ORIGINAL HINDI + TRANSLATED PUNJABI ===========
     # Searches the internet with BOTH the original Hindi source document and
     # its Punjabi translation, each carrying its own similarity %, instead
-    # of only searching the translated text.
-    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED, HINDI SOURCE + PUNJABI TRANSLATION")
+    # of only searching the translated text. The Hindi leg is filtered to
+    # the plagiarism similarity threshold; the Punjabi (translated) leg is
+    # searched sentence-by-sentence with NO threshold, so every matched
+    # sentence surfaces regardless of similarity.
+    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED, HINDI SOURCE (thresholded) + PUNJABI TRANSLATION (no threshold)")
     print("-" * 80)
 
     internet_matches = search_internet_bilingual(
-        hindi_text, translated_punjabi, max_results=30, use_sentence_search=use_sentence_search
+        hindi_text, translated_punjabi, max_results=30, use_sentence_search=use_sentence_search,
+        hindi_similarity_threshold=PLAGIARISM_SIMILARITY_THRESHOLD
     )
-    # Only surface internet matches above the same similarity threshold as
-    # the corpus check, instead of showing every result the search returned.
-    internet_matches = [m for m in internet_matches if m.get('similarity', 0) >= PLAGIARISM_SIMILARITY_THRESHOLD]
     internet_matches_hindi = [m for m in internet_matches if m.get('query_language') == 'hindi']
     internet_matches_punjabi = [m for m in internet_matches if m.get('query_language') == 'punjabi']
 
