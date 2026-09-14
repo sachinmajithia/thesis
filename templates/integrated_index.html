@@ -417,6 +417,7 @@ function renderInternetMatch(m) {
       <div class="title-row">
         <a href="${escapeHtml(m.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(m.title || m.url)}</a>
         ${badge(m.search_method || 'unknown', m.search_method === 'simulated' ? 'amber' : 'teal')}
+        ${m.similarity_method === 'semantic' ? badge('Semantic similarity', 'blue') : (m.similarity_method === 'rank_estimate' ? badge('Estimated (rank-based)', 'gray') : '')}
         ${queryLangBadge(m.query_language)}
         ${sentenceCount > 1 ? badge(`Matched ${sentenceCount} sentences · max similarity shown`, 'gray') : ''}
       </div>

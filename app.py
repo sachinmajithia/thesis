@@ -165,6 +165,22 @@ def extract_text_from_file(filepath):
 # 1. SENTENCE-BASED SEARCH EXTRACTOR
 # ============================================================================
 
+# Devanagari/Gurmukhi sentences typically end in "।" (danda), which nltk's
+# English-trained punkt tokenizer does not recognize as a sentence boundary -
+# text with no ASCII "." lands in a single giant "sentence" instead of being
+# split. This lightweight regex splits on the actual Hindi/Punjabi/Latin
+# sentence-enders and is used both for EBMT matching and for sentence-based
+# internet search, so a multi-sentence Hindi/Punjabi document is searched
+# sentence-by-sentence instead of as one long, ineffective query.
+_SENTENCE_END_RE = re.compile(r'(?<=[।!?.])\s+')
+
+def split_into_sentences(text):
+    """Split text into sentences, keeping the terminating punctuation attached."""
+    text = (text or '').strip()
+    if not text:
+        return []
+    return [s.strip() for s in _SENTENCE_END_RE.split(text) if s.strip()]
+
 class SentenceBasedSearcher:
     """Extract and create sentence-based search queries"""
 
@@ -186,8 +202,13 @@ class SentenceBasedSearcher:
             return []
 
         try:
-            # Tokenize into sentences
-            sentences = sent_tokenize(text)
+            # NLTK's punkt tokenizer is trained on English punctuation and
+            # does not recognise the Devanagari/Gurmukhi sentence-ending
+            # "।" (danda), so Hindi/Punjabi text with no ASCII "." lands in
+            # a single giant "sentence" - defeating sentence-based search.
+            # Prefer the Indic-aware splitter (also used for EBMT matching)
+            # and only fall back to sent_tokenize if it finds nothing.
+            sentences = split_into_sentences(text) or sent_tokenize(text)
 
             # Filter sentences by minimum word count
             valid_sentences = [
@@ -1149,6 +1170,27 @@ class EnhancedCorpusManager:
 # 5. ENHANCED INTERNET SEARCH WITH SENTENCE-BASED APPROACH
 # ============================================================================
 
+def _semantic_similarity(text_a: str, text_b: str) -> Optional[float]:
+    """
+    Real cross-lingual cosine similarity between two texts, using the same
+    fine-tuned IndicBERT / IndicSBERT model used for corpus matching -
+    instead of a fake, rank-based heuristic (e.g. "result #2 gets 0.87").
+
+    Returns None (rather than a made-up number) when the semantic model
+    isn't loaded or either text is empty, so callers can fall back to a
+    heuristic score explicitly instead of silently trusting a meaningless
+    default.
+    """
+    semantic_model = model_cache.get('semantic_model')
+    if not semantic_model or not text_a or not text_b:
+        return None
+    try:
+        embeddings = semantic_model.encode([text_a, text_b], normalize_embeddings=True)
+        return float(np.dot(embeddings[0], embeddings[1]))
+    except Exception as e:
+        print(f"⚠️ Semantic similarity computation failed: {e}")
+        return None
+
 def search_internet_google(query: str, max_results: int = 30, use_sentence_search: bool = True) -> List[Dict]:
     """
     Search Google for similar content using sentence-based approach
@@ -1334,12 +1376,20 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                     print(f"   ✅ SUCCESS: Got {len(results)} results from Google API")
 
                     for idx, item in enumerate(results):
+                        title = item.get('title', 'No title')
+                        snippet = item.get('snippet', 'No preview available')
+                        # Real semantic similarity between the query and this
+                        # result's title+snippet, using the cross-lingual
+                        # IndicBERT/IndicSBERT model - falls back to the old
+                        # rank-based estimate only when the model isn't loaded.
+                        sim = _semantic_similarity(query, f"{title} {snippet}")
                         match = {
                             'source': 'internet',
                             'url': item.get('link', ''),
-                            'title': item.get('title', 'No title'),
-                            'similarity': max(0.8, 0.95 - (idx * 0.08)),
-                            'snippet': item.get('snippet', 'No preview available'),
+                            'title': title,
+                            'similarity': sim if sim is not None else max(0.8, 0.95 - (idx * 0.08)),
+                            'similarity_method': 'semantic' if sim is not None else 'rank_estimate',
+                            'snippet': snippet,
                             'search_method': 'google_api'
                         }
                         matches.append(match)
@@ -1430,12 +1480,16 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                     print(f"   ✅ SUCCESS: Got {len(results)} results from SerpAPI")
 
                     for idx, item in enumerate(results):
+                        title = item.get('title', 'No title')
+                        snippet = item.get('snippet', 'No preview available')
+                        sim = _semantic_similarity(query, f"{title} {snippet}")
                         match = {
                             'source': 'internet',
                             'url': item.get('link', ''),
-                            'title': item.get('title', 'No title'),
-                            'similarity': max(0.5, 0.85 - (idx * 0.08)),
-                            'snippet': item.get('snippet', 'No preview available'),
+                            'title': title,
+                            'similarity': sim if sim is not None else max(0.5, 0.85 - (idx * 0.08)),
+                            'similarity_method': 'semantic' if sim is not None else 'rank_estimate',
+                            'snippet': snippet,
                             'search_method': 'serpapi'
                         }
                         matches.append(match)
