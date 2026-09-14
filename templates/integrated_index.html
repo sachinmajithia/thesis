@@ -157,27 +157,14 @@
 
 <div class="container">
   <nav class="tabs">
-    <button class="tab-btn active" data-tab="translate">Translate &amp; Compare</button>
-    <button class="tab-btn" data-tab="check">Plagiarism Check</button>
+    <button class="tab-btn active" data-tab="check">Plagiarism Check</button>
     <button class="tab-btn" data-tab="upload">Upload Document</button>
     <button class="tab-btn" data-tab="corpus">Corpus Manager</button>
+    <button class="tab-btn" data-tab="history">History</button>
   </nav>
 
-  <!-- ============ TAB: TRANSLATE & COMPARE ============ -->
-  <div class="tab-panel active" id="tab-translate">
-    <div class="card">
-      <h2>Translate Hindi → Punjabi</h2>
-      <p class="hint">Runs Dictionary, EBMT and NMT independently and shows both translation modes side-by-side, plus their agreement metrics.</p>
-      <textarea id="translateInput" placeholder="यहाँ हिंदी टेक्स्ट लिखें... (e.g. मुझे पानी चाहिए.)"></textarea>
-      <br>
-      <button class="primary" id="btnCompare" onclick="runCompare()">Compare Both Modes</button>
-      <div class="loading" id="compareLoading" style="display:none;">Translating…</div>
-    </div>
-    <div id="compareResult"></div>
-  </div>
-
   <!-- ============ TAB: PLAGIARISM CHECK (TEXT) ============ -->
-  <div class="tab-panel" id="tab-check">
+  <div class="tab-panel active" id="tab-check">
     <div class="card">
       <h2>Plagiarism Check — Text Input</h2>
       <p class="hint">Translates the Hindi input (both modes), then matches the translated Punjabi against the local corpus and the internet.</p>
@@ -204,15 +191,25 @@
 
     <div class="card">
       <h2>Add a Document to the Corpus</h2>
-      <p class="hint">Adds this document to the reference corpus used for future plagiarism matching.</p>
+      <p class="hint">Adds a document to the reference corpus used for future plagiarism matching — upload a file, or paste text directly below.</p>
       <div class="drop-zone" id="dropZoneCorpus">Drag &amp; drop a file here, or click to choose one<br><input type="file" id="fileInputCorpus" accept=".txt,.pdf,.docx,.doc" style="display:none;"></div>
       <div id="filenameChipCorpus"></div>
       <br>
       <input type="text" id="corpusTitle" placeholder="Title (optional)">
       <input type="text" id="corpusTags" placeholder="Tags, comma separated (optional)">
       <br>
-      <button class="primary" id="btnUploadCorpus" onclick="runUploadCorpus()">Add to Corpus</button>
+      <button class="primary" id="btnUploadCorpus" onclick="runUploadCorpus()">Add File to Corpus</button>
       <div id="uploadCorpusStatus"></div>
+
+      <div class="section-title" style="margin-top:22px;">Or Paste Text Directly</div>
+      <textarea id="corpusTextArea" placeholder="यहाँ हिंदी या ਪੰਜਾਬੀ ਟੈਕਸਟ ਪੇਸਟ ਕਰੋ... (paste Hindi or Punjabi text to add it to the corpus)"></textarea>
+      <br>
+      <input type="text" id="corpusTextFilename" placeholder="Filename (optional, e.g. my-doc.txt)">
+      <input type="text" id="corpusTextTitle" placeholder="Title (optional)">
+      <input type="text" id="corpusTextTags" placeholder="Tags, comma separated (optional)">
+      <br>
+      <button class="primary" id="btnAddCorpusText" onclick="runAddCorpusText()">Add Text to Corpus</button>
+      <div id="addCorpusTextStatus"></div>
     </div>
   </div>
 
@@ -234,6 +231,16 @@
       <h2>Documents <button class="secondary" style="float:right;" onclick="loadCorpus()">Refresh</button></h2>
       <div id="corpusTableWrap"><div class="empty-state">Loading…</div></div>
     </div>
+  </div>
+
+  <!-- ============ TAB: HISTORY ============ -->
+  <div class="tab-panel" id="tab-history">
+    <div class="card">
+      <h2>Plagiarism Check History <button class="secondary" style="float:right;" onclick="loadHistory()">Refresh</button></h2>
+      <p class="hint">Past plagiarism checks (text input and document upload), most recent first.</p>
+      <div id="historyTableWrap"><div class="empty-state">Loading…</div></div>
+    </div>
+    <div id="historyDetail"></div>
   </div>
 </div>
 
@@ -307,6 +314,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'corpus') { loadCorpus(); loadCorpusStats(); }
+    if (btn.dataset.tab === 'history') { loadHistory(); }
   });
 });
 
@@ -333,7 +341,7 @@ async function loadHealth() {
 loadHealth();
 
 // ---------------------------------------------------------------------------
-// Translation modes rendering (shared by Translate tab and Plagiarism Check tab)
+// Translation modes rendering (used by the Plagiarism Check and History tabs)
 // ---------------------------------------------------------------------------
 function methodBadge(method) {
   const map = { Dictionary: 'blue', EBMT: 'teal', NMT: 'green', None: 'gray' };
@@ -379,27 +387,8 @@ function renderModesHtml(modes) {
     </div>`;
 }
 
-async function runCompare() {
-  const hindiText = document.getElementById('translateInput').value.trim();
-  const out = document.getElementById('compareResult');
-  const loading = document.getElementById('compareLoading');
-  if (!hindiText) { out.innerHTML = `<div class="status-msg err">Please enter some Hindi text.</div>`; return; }
-  document.getElementById('btnCompare').disabled = true;
-  loading.style.display = 'block';
-  out.innerHTML = '';
-  try {
-    const data = await postJSON('/api/translate/compare', {hindi_text: hindiText});
-    out.innerHTML = renderModesHtml(data);
-  } catch (e) {
-    out.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
-  } finally {
-    loading.style.display = 'none';
-    document.getElementById('btnCompare').disabled = false;
-  }
-}
-
 // ---------------------------------------------------------------------------
-// Plagiarism results rendering (shared by text-check and upload-check)
+// Plagiarism results rendering (shared by text-check, upload-check and history)
 // ---------------------------------------------------------------------------
 function queryLangBadge(lang) {
   if (lang === 'hindi') return badge('Matched via: Hindi source', 'amber');
@@ -586,6 +575,34 @@ async function runUploadCorpus() {
   }
 }
 
+async function runAddCorpusText() {
+  const content = document.getElementById('corpusTextArea').value.trim();
+  const statusEl = document.getElementById('addCorpusTextStatus');
+  if (!content) { statusEl.innerHTML = `<div class="status-msg err">Please paste some text first.</div>`; return; }
+
+  const filename = document.getElementById('corpusTextFilename').value.trim() || `pasted-${Date.now()}.txt`;
+  const title = document.getElementById('corpusTextTitle').value.trim();
+  const tags = document.getElementById('corpusTextTags').value.split(',').map(t => t.trim()).filter(Boolean);
+
+  const btn = document.getElementById('btnAddCorpusText');
+  btn.disabled = true;
+  statusEl.innerHTML = `<div class="loading">Adding to corpus…</div>`;
+  try {
+    const data = await postJSON('/api/corpus/add', {filename, content, title, tags});
+    statusEl.innerHTML = `<div class="status-msg ${data.success ? 'ok' : 'err'}">${escapeHtml(data.message || data.error)} (corpus size: ${data.corpus_size})</div>`;
+    if (data.success) {
+      document.getElementById('corpusTextArea').value = '';
+      document.getElementById('corpusTextFilename').value = '';
+      document.getElementById('corpusTextTitle').value = '';
+      document.getElementById('corpusTextTags').value = '';
+    }
+  } catch (e) {
+    statusEl.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Corpus manager tab
 // ---------------------------------------------------------------------------
@@ -654,6 +671,74 @@ async function deleteCorpusDoc(encodedFilename) {
     await postJSON('/api/corpus/delete', {filename});
     loadCorpus();
     loadCorpusStats();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// History tab
+// ---------------------------------------------------------------------------
+async function loadHistory() {
+  const wrap = document.getElementById('historyTableWrap');
+  wrap.innerHTML = `<div class="empty-state">Loading…</div>`;
+  try {
+    const res = await fetch('/api/history/list');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load history');
+    const history = data.history || [];
+    if (!history.length) {
+      wrap.innerHTML = `<div class="empty-state">No plagiarism checks run yet. Run one from the "Plagiarism Check" or "Upload Document" tab.</div>`;
+      return;
+    }
+    wrap.innerHTML = `
+      <table>
+        <thead><tr><th>When</th><th>Query</th><th>Corpus Matches</th><th>Internet Matches</th><th>Time</th><th></th></tr></thead>
+        <tbody>
+          ${history.map(h => {
+            const preview = h.query_preview || '';
+            const shortPreview = preview.length > 60 ? preview.slice(0, 60) + '…' : preview;
+            const corpusPct = (h.max_corpus_similarity || 0) * 100;
+            const internetPct = (h.max_internet_similarity || 0) * 100;
+            return `
+            <tr>
+              <td>${h.check_timestamp ? new Date(h.check_timestamp).toLocaleString() : ''}</td>
+              <td>${escapeHtml(shortPreview)}</td>
+              <td>${h.corpus_matches} (${corpusPct.toFixed(0)}%)</td>
+              <td>${h.internet_matches} (${internetPct.toFixed(0)}%)</td>
+              <td>${h.processing_time}s</td>
+              <td>
+                <button class="secondary" onclick="viewHistoryDetail(${h.id})">View</button>
+                <button class="danger" onclick="deleteHistoryEntry(${h.id})">Delete</button>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>`;
+  } catch (e) {
+    wrap.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function viewHistoryDetail(id) {
+  const out = document.getElementById('historyDetail');
+  out.innerHTML = `<div class="loading">Loading…</div>`;
+  try {
+    const res = await fetch('/api/history/' + id);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load history entry');
+    out.innerHTML = renderPlagiarismResult(data);
+  } catch (e) {
+    out.innerHTML = `<div class="status-msg err">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function deleteHistoryEntry(id) {
+  if (!confirm('Delete this history entry?')) return;
+  try {
+    await postJSON('/api/history/delete', {id});
+    document.getElementById('historyDetail').innerHTML = '';
+    loadHistory();
   } catch (e) {
     alert(e.message);
   }

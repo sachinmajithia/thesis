@@ -1917,6 +1917,93 @@ def get_corpus_stats():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/history/list', methods=['GET'])
+def list_history():
+    """Get recent plagiarism-check history (text-input and document-upload checks)"""
+    try:
+        conn = sqlite3.connect('corpus_database.db')
+        cursor = conn.cursor()
+
+        cursor.execute('''SELECT id, query_content, query_language, corpus_matches,
+            max_corpus_similarity, internet_matches, max_internet_similarity,
+            processing_time, check_timestamp, search_method
+            FROM plagiarism_checks
+            ORDER BY check_timestamp DESC
+            LIMIT 100''')
+
+        results = cursor.fetchall()
+        conn.close()
+
+        history = []
+        for row in results:
+            history.append({
+                'id': row[0],
+                'query_preview': (row[1] or '')[:150],
+                'query_language': row[2],
+                'corpus_matches': row[3],
+                'max_corpus_similarity': row[4],
+                'internet_matches': row[5],
+                'max_internet_similarity': row[6],
+                'processing_time': row[7],
+                'check_timestamp': row[8],
+                'search_method': row[9]
+            })
+
+        print(f"✅ Retrieved {len(history)} plagiarism-check history entries")
+        return jsonify({'history': history})
+
+    except Exception as e:
+        print(f"❌ Error listing history: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/history/<int:check_id>', methods=['GET'])
+def get_history_detail(check_id):
+    """Get the full stored result for one past plagiarism check, for re-viewing."""
+    try:
+        conn = sqlite3.connect('corpus_database.db')
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT results_json FROM plagiarism_checks WHERE id = ?', (check_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row or not row[0]:
+            return jsonify({'error': 'History entry not found'}), 404
+
+        return jsonify(json.loads(row[0]))
+
+    except Exception as e:
+        print(f"❌ Error fetching history detail: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/history/delete', methods=['POST'])
+def delete_history_entry():
+    """Delete a plagiarism-check history entry"""
+    try:
+        data = request.get_json()
+        check_id = data.get('id')
+
+        if not check_id:
+            return jsonify({'success': False, 'error': 'No id provided'}), 400
+
+        conn = sqlite3.connect('corpus_database.db')
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM plagiarism_checks WHERE id = ?', (check_id,))
+
+        if cursor.rowcount > 0:
+            conn.commit()
+            conn.close()
+            print(f"✅ History entry deleted: {check_id}")
+            return jsonify({'success': True, 'message': f'History entry {check_id} deleted'})
+        else:
+            conn.close()
+            print(f"❌ History entry not found: {check_id}")
+            return jsonify({'success': False, 'message': 'History entry not found'}), 404
+
+    except Exception as e:
+        print(f"❌ Error deleting history entry: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check"""
