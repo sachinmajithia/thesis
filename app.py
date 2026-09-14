@@ -1333,7 +1333,6 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
 
                     print(f"   ✅ SUCCESS: Got {len(results)} results from Google API")
 
-
                     for idx, item in enumerate(results):
                         match = {
                             'source': 'internet',
@@ -1345,9 +1344,24 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                         }
                         matches.append(match)
 
-                    print(f"✅ Returning {len(matches)} Google API results")
+                    if matches:
+                        print(f"✅ Returning {len(matches)} Google API results")
+                        return matches
 
-                    return matches
+                    # A 200 status with zero items is a "successful" call that
+                    # found nothing - do NOT stop here. The most common cause
+                    # is that the Custom Search Engine (cx) is restricted to
+                    # a handful of sites instead of the whole web: a brand
+                    # new CSE defaults to that unless "Search the entire web"
+                    # is explicitly enabled, so it can return 0 results for a
+                    # query that finds real pages on google.com itself. Fall
+                    # through to SerpAPI / simulated results below instead of
+                    # silently returning an empty list.
+                    print(f"   ⚠️ Google API returned 0 results for this query, even though the "
+                          f"request succeeded. If a manual Google search finds real matches, check "
+                          f"that Custom Search Engine cx={search_engine_id} has 'Search the entire "
+                          f"web' enabled at https://programmablesearchengine.google.com/ - a new CSE "
+                          f"is restricted to specific sites by default.")
 
                 elif response.status_code == 403:
                     print(f"   ❌ 403 Forbidden - API Key or Search Engine ID invalid")
@@ -1426,8 +1440,12 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                         }
                         matches.append(match)
 
-                    print(f"✅ Returning {len(matches)} SerpAPI results")
-                    return matches
+                    if matches:
+                        print(f"✅ Returning {len(matches)} SerpAPI results")
+                        return matches
+
+                    print(f"   ⚠️ SerpAPI returned 0 results for this query - falling through to "
+                          f"simulated results.")
 
                 elif response.status_code == 403:
                     print(f"   ❌ 403 Forbidden - SerpAPI Key invalid")
