@@ -71,6 +71,19 @@ os.makedirs(app.config['CORPUS_FOLDER'], exist_ok=True)
 FINETUNED_INDICBERT_PATH = os.path.join('models', 'indicbert-finetuned-hi-pa')
 PRETRAINED_SEMANTIC_MODEL = 'l3cube-pune/indic-sentence-similarity-sbert'
 
+# NMT engine choices available for Hindi->Punjabi translation. NLLB-200 is
+# loaded eagerly at startup (see load_models()); IndicTrans2 is much larger
+# and is loaded lazily on first actual use instead, so choosing it costs
+# nothing for callers who never ask for it.
+NMT_MODEL_CHOICES = ('nllb', 'indictrans2')
+DEFAULT_NMT_MODEL = 'nllb'
+INDICTRANS2_MODEL_NAME = 'ai4bharat/indictrans2-indic-indic-1B'
+
+def _resolve_nmt_model(value) -> str:
+    """Normalize a caller-supplied NMT engine choice, falling back to the default for anything unrecognized."""
+    value = (value or '').strip().lower()
+    return value if value in NMT_MODEL_CHOICES else DEFAULT_NMT_MODEL
+
 # Only surface a corpus/internet result as a plagiarism match once its
 # similarity reaches this threshold - keeps the UI focused on strong,
 # high-confidence matches instead of every low-similarity hit.
@@ -864,7 +877,112 @@ def nmt_translate(hindi_sentence, tokenizer, model, device):
     except Exception as e:
         return f"NMT Error: {str(e)}", -1.0
 
-def translate_hindi_to_punjabi(hindi_sentence):
+def load_indictrans2_model():
+    """
+    Lazily load AI4Bharat's IndicTrans2 (indic-indic) model on first actual
+    use, and cache it afterward. It is a larger model than
+    NLLB-200-distilled-600M, so loading it eagerly at startup alongside
+    NLLB would only add to the OOM risk already flagged for NLLB alone;
+    since it is purely an alternate NMT engine a caller opts into, there is
+    no reason to pay that memory cost unless someone actually selects it.
+
+    Requires the 'IndicTransToolkit' package (for text pre/post-processing)
+    in addition to transformers - returns None with a clear log message if
+    that's not installed, rather than raising, so the app keeps running
+    with NLLB (and Dictionary/EBMT) available.
+    """
+    if 'indictrans2' in model_cache:
+        return model_cache['indictrans2']
+
+    print("\n📖 Loading IndicTrans2 (indic-indic) Translation Model...")
+    print(f"   Model: {INDICTRANS2_MODEL_NAME}")
+
+    try:
+        from IndicTransToolkit.processor import IndicProcessor
+    except ImportError:
+        print("⚠️ IndicTransToolkit not installed - install with: pip install IndicTransToolkit")
+        model_cache['indictrans2'] = None
+        return None
+
+    try:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"   Using device: {device}")
+
+        tokenizer = AutoTokenizer.from_pretrained(INDICTRANS2_MODEL_NAME, trust_remote_code=True)
+        try:
+            model = AutoModelForSeq2SeqLM.from_pretrained(
+                INDICTRANS2_MODEL_NAME, trust_remote_code=True, low_cpu_mem_usage=True
+            )
+        except ImportError:
+            model = AutoModelForSeq2SeqLM.from_pretrained(INDICTRANS2_MODEL_NAME, trust_remote_code=True)
+        model = model.to(device)
+
+        entry = {
+            'tokenizer': tokenizer,
+            'model': model,
+            'device': device,
+            'processor': IndicProcessor(inference=True),
+        }
+        model_cache['indictrans2'] = entry
+        print("✅ IndicTrans2 model loaded successfully!")
+        return entry
+
+    except Exception as e:
+        print(f"⚠️ IndicTrans2 model loading failed: {e}")
+        model_cache['indictrans2'] = None
+        return None
+
+def indictrans2_translate(hindi_sentence):
+    """Neural Machine Translation using AI4Bharat's IndicTrans2 (indic-indic)."""
+    entry = load_indictrans2_model()
+    if not entry:
+        return "IndicTrans2 model not available", -1.0
+
+    try:
+        tokenizer = entry['tokenizer']
+        model = entry['model']
+        device = entry['device']
+        ip = entry['processor']
+
+        src_lang, tgt_lang = "hin_Deva", "pan_Guru"
+        batch = ip.preprocess_batch([hindi_sentence], src_lang=src_lang, tgt_lang=tgt_lang)
+        inputs = tokenizer(batch, truncation=True, padding="longest", return_tensors="pt")
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        input_len = inputs['input_ids'].shape[1]
+        max_new_tokens = min(200, max(20, input_len * 4))
+
+        with torch.no_grad():
+            generated_tokens = model.generate(
+                **inputs,
+                num_beams=4,
+                no_repeat_ngram_size=3,
+                repetition_penalty=1.3,
+                max_new_tokens=max_new_tokens,
+                early_stopping=True
+            )
+
+        decoded = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+        translations = ip.postprocess_batch(decoded, lang=tgt_lang)
+        return translations[0], 0.95
+
+    except Exception as e:
+        return f"IndicTrans2 Error: {str(e)}", -1.0
+
+def run_nmt(hindi_sentence: str, model_choice: str = DEFAULT_NMT_MODEL):
+    """
+    Dispatch Hindi->Punjabi neural translation to the selected NMT engine.
+
+    model_choice: 'nllb' (default, loaded eagerly at startup - see
+        load_models()) or 'indictrans2' (loaded lazily on first use here).
+    """
+    if model_choice == 'indictrans2':
+        return indictrans2_translate(hindi_sentence)
+    return nmt_translate(
+        hindi_sentence, model_cache.get('tokenizer'), model_cache.get('model'), model_cache.get('device')
+    )
+
+def translate_hindi_to_punjabi(hindi_sentence, model_choice: str = DEFAULT_NMT_MODEL):
     """Main translation function with cascade approach: Dictionary -> EBMT -> NMT"""
     print(f"\n🔄 Translating Hindi to Punjabi: '{hindi_sentence}'")
 
@@ -895,21 +1013,16 @@ def translate_hindi_to_punjabi(hindi_sentence):
         return ebmt_result, "EBMT"
 
     # 3. NMT as final fallback
-    print(f"⚠️ EBMT failed. Trying NMT...")
-    if not model_cache.get('loaded'):
+    print(f"⚠️ EBMT failed. Trying NMT ({model_choice})...")
+    if model_choice != 'indictrans2' and not model_cache.get('loaded'):
         return "Models not loaded", "None"
 
-    nmt_result, nmt_score = nmt_translate(
-        hindi_sentence,
-        model_cache['tokenizer'],
-        model_cache['model'],
-        model_cache['device']
-    )
+    nmt_result, nmt_score = run_nmt(hindi_sentence, model_choice=model_choice)
 
     print(f"✓ NMT translation: {nmt_result}")
     return nmt_result, "NMT"
 
-def translate_both_modes(hindi_sentence: str) -> Dict:
+def translate_both_modes(hindi_sentence: str, model_choice: str = DEFAULT_NMT_MODEL) -> Dict:
     """
     Run BOTH translation modes (EBMT and NMT) independently and return both
     outputs side-by-side, together with agreement metrics (BLEU and semantic
@@ -917,12 +1030,15 @@ def translate_both_modes(hindi_sentence: str) -> Dict:
     evaluation of example-based vs. neural machine translation, and for the
     "final output" of the system so a caller can see both modes rather than
     only the single cascade-selected translation.
+
+    model_choice selects the NMT engine used for the 'nmt' mode: 'nllb'
+    (default) or 'indictrans2'.
     """
     result = {
         'input': hindi_sentence,
         'dictionary': {'covered_fully': False, 'translation': None, 'untranslated_words': None},
         'ebmt': {'translation': None, 'similarity': None},
-        'nmt': {'translation': None, 'confidence': None},
+        'nmt': {'translation': None, 'confidence': None, 'engine': model_choice},
         'agreement': {},
         'recommended': None,
     }
@@ -948,11 +1064,9 @@ def translate_both_modes(hindi_sentence: str) -> Dict:
     result['ebmt']['translation'] = ebmt_text
     result['ebmt']['similarity'] = round(float(ebmt_score), 4) if ebmt_score is not None else None
 
-    # Mode 2: NMT
-    if model_cache.get('loaded'):
-        nmt_text, nmt_conf = nmt_translate(
-            hindi_sentence, model_cache['tokenizer'], model_cache['model'], model_cache['device']
-        )
+    # Mode 2: NMT (selected engine)
+    if model_choice == 'indictrans2' or model_cache.get('loaded'):
+        nmt_text, nmt_conf = run_nmt(hindi_sentence, model_choice=model_choice)
     else:
         nmt_text, nmt_conf = "Models not loaded", -1.0
     result['nmt']['translation'] = nmt_text
@@ -992,7 +1106,7 @@ def translate_both_modes(hindi_sentence: str) -> Dict:
     elif ebmt_valid and ebmt_score is not None and ebmt_score > 0.3:
         result['recommended'] = {'translation': ebmt_text, 'method': 'EBMT'}
     else:
-        result['recommended'] = {'translation': nmt_text, 'method': 'NMT'}
+        result['recommended'] = {'translation': nmt_text, 'method': 'NMT', 'engine': model_choice}
 
     return result
 
@@ -1854,6 +1968,7 @@ def upload_document_plagiarism():
             return jsonify({'success': False, 'error': f'File type not allowed. Allowed: {", ".join(app.config["ALLOWED_EXTENSIONS"])}'}), 400
 
         use_sentence_search = request.form.get('use_sentence_search', 'true').lower() != 'false'
+        nmt_model = _resolve_nmt_model(request.form.get('nmt_model'))
 
         # Save uploaded file
         filename = safe_upload_filename(file.filename)
@@ -1873,7 +1988,7 @@ def upload_document_plagiarism():
 
         print(f"✅ Document extracted: {len(content)} characters")
 
-        response_data = run_plagiarism_pipeline(content, use_sentence_search)
+        response_data = run_plagiarism_pipeline(content, use_sentence_search, nmt_model=nmt_model)
         response_data['filename'] = filename
         response_data['character_count'] = len(content)
         response_data['word_count'] = len(content.split())
@@ -1945,11 +2060,18 @@ def upload_document_corpus():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
-def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -> Dict:
+def run_plagiarism_pipeline(
+    hindi_text: str,
+    use_sentence_search: bool = True,
+    nmt_model: str = DEFAULT_NMT_MODEL
+) -> Dict:
     """
     Core plagiarism-check pipeline shared by the text-input and
     document-upload endpoints: translate (both EBMT and NMT modes) → corpus
     matching → sentence-based internet search → summary + DB logging.
+
+    nmt_model selects the NMT engine ('nllb' or 'indictrans2') used for the
+    NMT translation mode.
     """
     print("\n" + "=" * 80)
     print("PLAGIARISM CHECK STARTED")
@@ -1958,10 +2080,10 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     start_time = datetime.now()
 
     # =========== STEP 1: TRANSLATE (BOTH MODES) ===========
-    print("\n[STEP 1] HINDI TO PUNJABI TRANSLATION (DICTIONARY + EBMT + NMT)")
+    print(f"\n[STEP 1] HINDI TO PUNJABI TRANSLATION (DICTIONARY + EBMT + NMT/{nmt_model})")
     print("-" * 80)
 
-    both_modes = translate_both_modes(hindi_text)
+    both_modes = translate_both_modes(hindi_text, model_choice=nmt_model)
     translated_punjabi = both_modes['recommended']['translation']
     translation_method = both_modes['recommended']['method']
 
@@ -2098,11 +2220,12 @@ def plagiarism_check_text():
         data = request.get_json()
         hindi_text = data.get('hindi_text', '').strip()
         use_sentence_search = data.get('use_sentence_search', True)
+        nmt_model = _resolve_nmt_model(data.get('nmt_model'))
 
         if not hindi_text:
             return jsonify({'error': 'No Hindi text provided'}), 400
 
-        return jsonify(run_plagiarism_pipeline(hindi_text, use_sentence_search))
+        return jsonify(run_plagiarism_pipeline(hindi_text, use_sentence_search, nmt_model=nmt_model))
 
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -2120,11 +2243,12 @@ def translate_compare():
     try:
         data = request.get_json()
         hindi_text = data.get('hindi_text', '').strip()
+        nmt_model = _resolve_nmt_model(data.get('nmt_model'))
 
         if not hindi_text:
             return jsonify({'error': 'No Hindi text provided'}), 400
 
-        result = translate_both_modes(hindi_text)
+        result = translate_both_modes(hindi_text, model_choice=nmt_model)
         return jsonify({'success': True, **result})
 
     except Exception as e:
@@ -2340,6 +2464,13 @@ def health():
         'dictionary_size': len(translation_dict),
         'ebmt_corpus_size': len(parallel_corpus),
         'corpus_size': corpus_cache['corpus_size'],
+        'nmt_models': {
+            'nllb': model_cache.get('model') is not None,
+            # IndicTrans2 loads lazily on first use, so 'indictrans2' not
+            # yet being a key in model_cache means "not attempted yet"
+            # (still selectable) rather than "unavailable".
+            'indictrans2': model_cache.get('indictrans2') is not None if 'indictrans2' in model_cache else None,
+        },
         'timestamp': datetime.now().isoformat()
     })
 

@@ -15,3 +15,6 @@ werkzeug
 PyPDF2
 python-docx
 datasets
+# Only needed for the optional IndicTrans2 NMT engine (app.py loads it lazily
+# on first use and degrades gracefully to NLLB-200 if this isn't installed).
+IndicTransToolkit
