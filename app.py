@@ -888,7 +888,7 @@ def load_indictrans2_model():
 
     Requires the 'IndicTransToolkit' package (for text pre/post-processing)
     in addition to transformers - returns None with a clear log message if
-    that's not installed, rather than raising, so the app keeps running
+    it can't be imported, rather than raising, so the app keeps running
     with NLLB (and Dictionary/EBMT) available.
     """
     if 'indictrans2' in model_cache:
@@ -897,10 +897,25 @@ def load_indictrans2_model():
     print("\n📖 Loading IndicTrans2 (indic-indic) Translation Model...")
     print(f"   Model: {INDICTRANS2_MODEL_NAME}")
 
+    # IndicTransToolkit/__init__.py eagerly imports its evaluator (which
+    # needs indic-nlp-library and sacrebleu) and collator (which needs
+    # transformers) submodules, so importing IndicProcessor at all - via
+    # either the documented top-level path or the submodule path - runs
+    # that same __init__.py and can fail on any of those transitive
+    # dependencies, not just on IndicTransToolkit itself being absent.
+    # Catch broadly and always print the REAL underlying error/type instead
+    # of a blanket "not installed": if the package is actually installed
+    # but one of its own dependencies has a version mismatch, "not
+    # installed" is simply wrong and sends someone re-installing a package
+    # that was never the problem.
     try:
-        from IndicTransToolkit.processor import IndicProcessor
-    except ImportError:
-        print("⚠️ IndicTransToolkit not installed - install with: pip install IndicTransToolkit")
+        from IndicTransToolkit import IndicProcessor
+    except Exception as e:
+        print(f"⚠️ Could not import IndicProcessor from IndicTransToolkit: {type(e).__name__}: {e}")
+        print(f"   If IndicTransToolkit is already installed, the error above names the actual "
+              f"failing import (commonly indic-nlp-library, sacrebleu, or a transformers version "
+              f"mismatch pulled in by IndicTransToolkit's own __init__.py) rather than "
+              f"IndicTransToolkit itself being missing.")
         model_cache['indictrans2'] = None
         return None
 
