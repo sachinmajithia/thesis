@@ -1,0 +1,15 @@
+# Dependencies for the IndicTrans2 worker (indictrans2_worker.py), which
+# runs in its OWN virtual environment, separate from the main app's
+# (see requirements.txt). AI4Bharat's trust_remote_code=True model/tokenizer
+# code for IndicTrans2 targets transformers 4.x and is incompatible with
+# the transformers 5.x the main app uses for NLLB, so this worker gets its
+# own environment pinned to a compatible transformers instead.
+#
+# Set up with:
+#   python3 -m venv indictrans2_env
+#   indictrans2_env/bin/pip install -r requirements-indictrans2.txt
+torch
+transformers>=4.51,<5.0
+sentencepiece
+protobuf
+IndicTransToolkit

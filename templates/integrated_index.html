@@ -339,12 +339,14 @@ async function loadHealth() {
     const h = await res.json();
     const dot = document.getElementById('healthDot');
     const text = document.getElementById('healthText');
+    const nmt = h.nmt_models || {};
+    const indictrans2Note = nmt.indictrans2 ? ' · IndicTrans2: ready' : ' · IndicTrans2: not available';
     if (h.models_loaded) {
       dot.className = 'dot on';
-      text.textContent = `NMT + semantic models loaded (${h.semantic_model_source || 'unknown source'}) · Dictionary: ${h.dictionary_size} pairs · EBMT corpus: ${h.ebmt_corpus_size} pairs · ${h.corpus_size} corpus docs`;
+      text.textContent = `NMT + semantic models loaded (${h.semantic_model_source || 'unknown source'}) · Dictionary: ${h.dictionary_size} pairs · EBMT corpus: ${h.ebmt_corpus_size} pairs · ${h.corpus_size} corpus docs${indictrans2Note}`;
     } else {
       dot.className = 'dot off';
-      text.textContent = `Running in Dictionary + EBMT fallback mode (NMT model not loaded) · Dictionary: ${h.dictionary_size} pairs · EBMT corpus: ${h.ebmt_corpus_size} pairs · ${h.corpus_size} corpus docs`;
+      text.textContent = `Running in Dictionary + EBMT fallback mode (NMT model not loaded) · Dictionary: ${h.dictionary_size} pairs · EBMT corpus: ${h.ebmt_corpus_size} pairs · ${h.corpus_size} corpus docs${indictrans2Note}`;
     }
   } catch (e) {
     document.getElementById('healthText').textContent = 'Could not reach server health endpoint.';

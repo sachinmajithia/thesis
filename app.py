@@ -11,8 +11,8 @@ import json
 import pickle
 import numpy as np
 import re
-import sys
-import types
+import subprocess
+import threading
 import unicodedata
 import os
 import random
@@ -73,13 +73,22 @@ os.makedirs(app.config['CORPUS_FOLDER'], exist_ok=True)
 FINETUNED_INDICBERT_PATH = os.path.join('models', 'indicbert-finetuned-hi-pa')
 PRETRAINED_SEMANTIC_MODEL = 'l3cube-pune/indic-sentence-similarity-sbert'
 
-# NMT engine choices available for Hindi->Punjabi translation. NLLB-200 is
-# loaded eagerly at startup (see load_models()); IndicTrans2 is much larger
-# and is loaded lazily on first actual use instead, so choosing it costs
-# nothing for callers who never ask for it.
+# NMT engine choices available for Hindi->Punjabi translation. NLLB-200
+# runs in-process, loaded eagerly at startup (see load_models()).
+# IndicTrans2 runs in a SEPARATE Python environment (its own venv, as a
+# long-lived subprocess - see start_indictrans2_worker() below), also
+# loaded eagerly at startup, because AI4Bharat's trust_remote_code=True
+# model/tokenizer code for IndicTrans2 was written against transformers
+# 4.x and is incompatible with the transformers 5.x this app otherwise
+# uses for NLLB; isolating it in its own environment sidesteps that
+# entirely instead of patching around each individual incompatibility.
 NMT_MODEL_CHOICES = ('nllb', 'indictrans2')
 DEFAULT_NMT_MODEL = 'nllb'
 INDICTRANS2_MODEL_NAME = 'ai4bharat/indictrans2-indic-indic-1B'
+INDICTRANS2_WORKER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'indictrans2_worker.py')
+INDICTRANS2_VENV_DIR = os.getenv(
+    'INDICTRANS2_VENV', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'indictrans2_env')
+)
 
 def _resolve_nmt_model(value) -> str:
     """Normalize a caller-supplied NMT engine choice, falling back to the default for anything unrecognized."""
@@ -423,6 +432,12 @@ def load_models():
             model_cache['device'] = device
 
             print("✅ NLLB-200 model loaded successfully!")
+
+        # Load IndicTrans2, in its own separate environment/process - see
+        # start_indictrans2_worker() for why. Also loaded eagerly here (not
+        # lazily on first use) so it's warm before the first request, same
+        # as NLLB above.
+        start_indictrans2_worker()
 
         # Load Semantic Model for Cross-Language Detection.
         # Prefer our own IndicBERT fine-tuned on the Hindi-Punjabi parallel
@@ -879,151 +894,113 @@ def nmt_translate(hindi_sentence, tokenizer, model, device):
     except Exception as e:
         return f"NMT Error: {str(e)}", -1.0
 
-def load_indictrans2_model():
+def _indictrans2_venv_python():
+    """Path to the separate IndicTrans2 venv's Python interpreter, or None if that venv doesn't exist yet."""
+    for rel in (os.path.join('bin', 'python'), os.path.join('Scripts', 'python.exe')):
+        candidate = os.path.join(INDICTRANS2_VENV_DIR, rel)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+def start_indictrans2_worker():
     """
-    Lazily load AI4Bharat's IndicTrans2 (indic-indic) model on first actual
-    use, and cache it afterward. It is a larger model than
-    NLLB-200-distilled-600M, so loading it eagerly at startup alongside
-    NLLB would only add to the OOM risk already flagged for NLLB alone;
-    since it is purely an alternate NMT engine a caller opts into, there is
-    no reason to pay that memory cost unless someone actually selects it.
+    Start the IndicTrans2 worker as a long-lived subprocess in its own
+    Python environment, and block until it reports ready - so it is loaded
+    and warm from app startup (same as NLLB), not lazily on first request.
 
-    Requires the 'IndicTransToolkit' package (for text pre/post-processing)
-    in addition to transformers - returns None with a clear log message if
-    it can't be imported, rather than raising, so the app keeps running
-    with NLLB (and Dictionary/EBMT) available.
+    Runs in a SEPARATE venv from the rest of this app (from NLLB) because
+    AI4Bharat's trust_remote_code=True model/tokenizer code for IndicTrans2
+    targets transformers 4.x and is incompatible with the transformers 5.x
+    this app otherwise uses; isolating it sidesteps that entirely instead
+    of patching around each individual incompatibility one at a time.
+
+    Skips gracefully (the app keeps running with NLLB / Dictionary / EBMT)
+    if that venv hasn't been set up yet:
+
+        python3 -m venv indictrans2_env
+        indictrans2_env/bin/pip install -r requirements-indictrans2.txt
     """
-    if 'indictrans2' in model_cache:
-        return model_cache['indictrans2']
+    if os.getenv('SKIP_INDICTRANS2_MODEL', '').lower() in ('1', 'true', 'yes'):
+        print("\n📖 SKIP_INDICTRANS2_MODEL is set - skipping IndicTrans2 worker startup.")
+        model_cache['indictrans2_worker'] = None
+        return
 
-    print("\n📖 Loading IndicTrans2 (indic-indic) Translation Model...")
-    print(f"   Model: {INDICTRANS2_MODEL_NAME}")
+    python_exe = _indictrans2_venv_python()
+    if not python_exe:
+        print(f"\n📖 IndicTrans2: no venv found at '{INDICTRANS2_VENV_DIR}' - skipping "
+              f"(NLLB is still available). To enable IndicTrans2, set up its own environment:")
+        print(f"   python3 -m venv {INDICTRANS2_VENV_DIR}")
+        print(f"   {INDICTRANS2_VENV_DIR}/bin/pip install -r requirements-indictrans2.txt")
+        model_cache['indictrans2_worker'] = None
+        return
 
-    # IndicTransToolkit 1.1.1's collator.py does
-    # "from transformers.tokenization_utils import PreTrainedTokenizerBase",
-    # a module path that no longer exposes that name on transformers>=5
-    # (confirmed: transformers 5.x turned transformers.tokenization_utils
-    # into a lazy/virtual module - PreTrainedTokenizerBase now lives at the
-    # transformers top level instead). That breaks IndicTransToolkit's
-    # import chain with "ImportError: cannot import name
-    # 'PreTrainedTokenizerBase' from 'transformers.tokenization_utils'"
-    # even though both packages are installed correctly. Patch the name
-    # back onto that module before importing IndicTransToolkit, rather
-    # than requiring the whole app to pin an older transformers just for
-    # this one optional NMT engine.
-    try:
-        import transformers.tokenization_utils as _tok_utils
-        if not hasattr(_tok_utils, 'PreTrainedTokenizerBase'):
-            from transformers import PreTrainedTokenizerBase as _PTB
-            _tok_utils.PreTrainedTokenizerBase = _PTB
-    except Exception as e:
-        print(f"⚠️ Could not apply the transformers>=5 compatibility shim for IndicTransToolkit: {e}")
-
-    # IndicTransToolkit/__init__.py eagerly imports its evaluator (which
-    # needs indic-nlp-library and sacrebleu) and collator (which needs
-    # transformers) submodules, so importing IndicProcessor at all - via
-    # either the documented top-level path or the submodule path - runs
-    # that same __init__.py and can fail on any of those transitive
-    # dependencies, not just on IndicTransToolkit itself being absent.
-    # Catch broadly and always print the REAL underlying error/type instead
-    # of a blanket "not installed": if the package is actually installed
-    # but one of its own dependencies has a version mismatch, "not
-    # installed" is simply wrong and sends someone re-installing a package
-    # that was never the problem.
-    try:
-        from IndicTransToolkit import IndicProcessor
-    except Exception as e:
-        print(f"⚠️ Could not import IndicProcessor from IndicTransToolkit: {type(e).__name__}: {e}")
-        print(f"   If IndicTransToolkit is already installed, the error above names the actual "
-              f"failing import (commonly indic-nlp-library, sacrebleu, or a transformers version "
-              f"mismatch pulled in by IndicTransToolkit's own __init__.py) rather than "
-              f"IndicTransToolkit itself being missing.")
-        model_cache['indictrans2'] = None
-        return None
-
-    # ai4bharat/indictrans2-*'s trust_remote_code=True tokenizer/model code
-    # (downloaded and executed from the HF Hub repo below) was written
-    # against transformers 4.x and can import "transformers.onnx" - a
-    # module removed entirely in transformers 5.x ("No module named
-    # 'transformers.onnx'"). We can't patch that repo's code, so register a
-    # harmless stand-in module before it runs: any name pulled from it
-    # (OnnxConfig, PatchingSpec, etc.) becomes an inert placeholder class.
-    # This is a best-effort shim, not a verified fix for the exact remote
-    # code - our translate-only usage never actually exercises ONNX export,
-    # so a real implementation of these classes shouldn't be needed, but if
-    # loading still fails afterward the remaining incompatibility will need
-    # a transformers version compatible with that remote code (it targets
-    # the 4.x series) rather than another shim here.
-    if 'transformers.onnx' not in sys.modules:
-        try:
-            class _InertOnnxStub(types.ModuleType):
-                def __getattr__(self, name):
-                    return type(name, (), {})
-            sys.modules['transformers.onnx'] = _InertOnnxStub('transformers.onnx')
-        except Exception as e:
-            print(f"⚠️ Could not install the transformers.onnx compatibility stub: {e}")
+    print(f"\n📖 Loading IndicTrans2 ({INDICTRANS2_MODEL_NAME}) in its own environment...")
+    print(f"   Python: {python_exe}")
+    print(f"   This is a separate transformers install from NLLB's - first load can take a while.")
 
     try:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"   Using device: {device}")
+        process = subprocess.Popen(
+            [python_exe, INDICTRANS2_WORKER_SCRIPT],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1
+        )
 
-        tokenizer = AutoTokenizer.from_pretrained(INDICTRANS2_MODEL_NAME, trust_remote_code=True)
-        try:
-            model = AutoModelForSeq2SeqLM.from_pretrained(
-                INDICTRANS2_MODEL_NAME, trust_remote_code=True, low_cpu_mem_usage=True
-            )
-        except ImportError:
-            model = AutoModelForSeq2SeqLM.from_pretrained(INDICTRANS2_MODEL_NAME, trust_remote_code=True)
-        model = model.to(device)
+        # Drain the worker's stderr into this process's own logs in the
+        # background - both so its load/error messages are visible here,
+        # and so the pipe never fills up and blocks the child.
+        def _drain_stderr(proc):
+            for line in proc.stderr:
+                print(f"   [indictrans2_worker] {line.rstrip()}")
+        threading.Thread(target=_drain_stderr, args=(process,), daemon=True).start()
 
-        entry = {
-            'tokenizer': tokenizer,
-            'model': model,
-            'device': device,
-            'processor': IndicProcessor(inference=True),
-        }
-        model_cache['indictrans2'] = entry
-        print("✅ IndicTrans2 model loaded successfully!")
-        return entry
+        ready_line = process.stdout.readline()
+        ready = False
+        if ready_line:
+            try:
+                ready = json.loads(ready_line).get('ready') is True
+            except json.JSONDecodeError:
+                ready = False
+
+        if ready:
+            model_cache['indictrans2_worker'] = process
+            model_cache['indictrans2_lock'] = threading.Lock()
+            print("✅ IndicTrans2 worker ready (separate environment)!")
+        else:
+            print(f"⚠️ IndicTrans2 worker did not report ready (got: {ready_line!r}) - "
+                  f"IndicTrans2 will be unavailable; NLLB is still available.")
+            process.kill()
+            model_cache['indictrans2_worker'] = None
 
     except Exception as e:
-        print(f"⚠️ IndicTrans2 model loading failed: {e}")
-        model_cache['indictrans2'] = None
-        return None
+        print(f"⚠️ Failed to start IndicTrans2 worker: {e}")
+        model_cache['indictrans2_worker'] = None
 
 def indictrans2_translate(hindi_sentence):
-    """Neural Machine Translation using AI4Bharat's IndicTrans2 (indic-indic)."""
-    entry = load_indictrans2_model()
-    if not entry:
+    """
+    Neural Machine Translation using AI4Bharat's IndicTrans2 (indic-indic),
+    via the long-lived worker subprocess started by
+    start_indictrans2_worker() at app startup (see there for why it runs
+    in a separate environment).
+    """
+    process = model_cache.get('indictrans2_worker')
+    lock = model_cache.get('indictrans2_lock')
+    if not process or process.poll() is not None:
         return "IndicTrans2 model not available", -1.0
 
     try:
-        tokenizer = entry['tokenizer']
-        model = entry['model']
-        device = entry['device']
-        ip = entry['processor']
+        with lock:
+            process.stdin.write(json.dumps({'hindi_sentence': hindi_sentence}) + '\n')
+            process.stdin.flush()
+            response_line = process.stdout.readline()
 
-        src_lang, tgt_lang = "hin_Deva", "pan_Guru"
-        batch = ip.preprocess_batch([hindi_sentence], src_lang=src_lang, tgt_lang=tgt_lang)
-        inputs = tokenizer(batch, truncation=True, padding="longest", return_tensors="pt")
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+        if not response_line:
+            return "IndicTrans2 Error: worker process closed its output unexpectedly", -1.0
 
-        input_len = inputs['input_ids'].shape[1]
-        max_new_tokens = min(200, max(20, input_len * 4))
+        response = json.loads(response_line)
+        if 'error' in response:
+            return f"IndicTrans2 Error: {response['error']}", -1.0
 
-        with torch.no_grad():
-            generated_tokens = model.generate(
-                **inputs,
-                num_beams=4,
-                no_repeat_ngram_size=3,
-                repetition_penalty=1.3,
-                max_new_tokens=max_new_tokens,
-                early_stopping=True
-            )
-
-        decoded = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
-        translations = ip.postprocess_batch(decoded, lang=tgt_lang)
-        return translations[0], 0.95
+        return response['translation'], float(response.get('confidence', 0.95))
 
     except Exception as e:
         return f"IndicTrans2 Error: {str(e)}", -1.0
@@ -1032,8 +1009,10 @@ def run_nmt(hindi_sentence: str, model_choice: str = DEFAULT_NMT_MODEL):
     """
     Dispatch Hindi->Punjabi neural translation to the selected NMT engine.
 
-    model_choice: 'nllb' (default, loaded eagerly at startup - see
-        load_models()) or 'indictrans2' (loaded lazily on first use here).
+    model_choice: 'nllb' (default, runs in-process, loaded eagerly at
+        startup - see load_models()) or 'indictrans2' (runs in its own
+        separate environment/process, also loaded eagerly at startup -
+        see start_indictrans2_worker()).
     """
     if model_choice == 'indictrans2':
         return indictrans2_translate(hindi_sentence)
@@ -2525,10 +2504,10 @@ def health():
         'corpus_size': corpus_cache['corpus_size'],
         'nmt_models': {
             'nllb': model_cache.get('model') is not None,
-            # IndicTrans2 loads lazily on first use, so 'indictrans2' not
-            # yet being a key in model_cache means "not attempted yet"
-            # (still selectable) rather than "unavailable".
-            'indictrans2': model_cache.get('indictrans2') is not None if 'indictrans2' in model_cache else None,
+            'indictrans2': (
+                model_cache.get('indictrans2_worker') is not None
+                and model_cache['indictrans2_worker'].poll() is None
+            ),
         },
         'timestamp': datetime.now().isoformat()
     })
