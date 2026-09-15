@@ -15,3 +15,5 @@ werkzeug
 PyPDF2
 python-docx
 datasets
+# The IndicTrans2 NMT engine runs in its own separate environment instead
+# (see requirements-indictrans2.txt) - nothing extra needed here for it.

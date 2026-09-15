@@ -11,6 +11,8 @@ import json
 import pickle
 import numpy as np
 import re
+import subprocess
+import threading
 import unicodedata
 import os
 import random
@@ -70,6 +72,39 @@ os.makedirs(app.config['CORPUS_FOLDER'], exist_ok=True)
 # If present at startup, it is used instead of the generic pretrained model.
 FINETUNED_INDICBERT_PATH = os.path.join('models', 'indicbert-finetuned-hi-pa')
 PRETRAINED_SEMANTIC_MODEL = 'l3cube-pune/indic-sentence-similarity-sbert'
+
+# NMT engine choices available for Hindi->Punjabi translation. NLLB-200
+# runs in-process, loaded eagerly at startup (see load_models()).
+# IndicTrans2 runs in a SEPARATE Python environment (its own venv, as a
+# long-lived subprocess - see start_indictrans2_worker() below), also
+# loaded eagerly at startup, because AI4Bharat's trust_remote_code=True
+# model/tokenizer code for IndicTrans2 was written against transformers
+# 4.x and is incompatible with the transformers 5.x this app otherwise
+# uses for NLLB; isolating it in its own environment sidesteps that
+# entirely instead of patching around each individual incompatibility.
+NMT_MODEL_CHOICES = ('nllb', 'indictrans2')
+DEFAULT_NMT_MODEL = 'nllb'
+INDICTRANS2_MODEL_NAME = 'ai4bharat/indictrans2-indic-indic-1B'
+INDICTRANS2_WORKER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'indictrans2_worker.py')
+INDICTRANS2_VENV_DIR = os.getenv(
+    'INDICTRANS2_VENV', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'indictrans2_env')
+)
+
+def _resolve_nmt_model(value) -> str:
+    """Normalize a caller-supplied NMT engine choice, falling back to the default for anything unrecognized."""
+    value = (value or '').strip().lower()
+    return value if value in NMT_MODEL_CHOICES else DEFAULT_NMT_MODEL
+
+# Only surface a corpus/internet result as a plagiarism match once its
+# similarity reaches this threshold - keeps the UI focused on strong,
+# high-confidence matches instead of every low-similarity hit.
+PLAGIARISM_SIMILARITY_THRESHOLD = 0.80
+
+# Threshold for the translated-Punjabi leg of internet search specifically,
+# which runs keyword-based (not semantic) matching - a lower bar than the
+# Hindi-source leg since keyword/phrase search naturally scores lower than
+# a full-sentence semantic comparison even for a real match.
+PUNJABI_INTERNET_SIMILARITY_THRESHOLD = 0.65
 
 model_cache = {}
 corpus_cache = {
@@ -160,6 +195,46 @@ def extract_text_from_file(filepath):
 # 1. SENTENCE-BASED SEARCH EXTRACTOR
 # ============================================================================
 
+# Devanagari/Gurmukhi sentences typically end in "।" (danda), which nltk's
+# English-trained punkt tokenizer does not recognize as a sentence boundary -
+# text with no ASCII "." lands in a single giant "sentence" instead of being
+# split. This lightweight regex splits on the actual Hindi/Punjabi/Latin
+# sentence-enders and is used both for EBMT matching and for sentence-based
+# internet search, so a multi-sentence Hindi/Punjabi document is searched
+# sentence-by-sentence instead of as one long, ineffective query.
+_SENTENCE_END_RE = re.compile(r'(?<=[।!?.])\s+')
+
+def split_into_sentences(text):
+    """Split text into sentences, keeping the terminating punctuation attached."""
+    text = (text or '').strip()
+    if not text:
+        return []
+    return [s.strip() for s in _SENTENCE_END_RE.split(text) if s.strip()]
+
+# Common Punjabi/Hindi function words (pronouns, postpositions, auxiliary
+# verbs, conjunctions) - stripped out when building keyword search queries.
+# A real person searching Google types the distinctive content words from a
+# sentence, not its grammatical filler; leaving stopwords in produces vague
+# queries that match loosely-related pages instead of the actual topic.
+_INDIC_STOPWORDS = {
+    # Punjabi
+    'ਹੈ', 'ਹਨ', 'ਸੀ', 'ਸਨ', 'ਹੋ', 'ਹੋਵੇ', 'ਹੋਵੇਗਾ', 'ਹੋਵੇਗੀ',
+    'ਦਾ', 'ਦੀ', 'ਦੇ', 'ਨੂੰ', 'ਨੇ', 'ਤੇ', 'ਤੋਂ', 'ਵਿੱਚ', 'ਵਿਚ', 'ਨਾਲ', 'ਲਈ',
+    'ਅਤੇ', 'ਜਾਂ', 'ਪਰ', 'ਕਿ', 'ਜੋ', 'ਵੀ', 'ਹੀ', 'ਨਾ',
+    'ਇੱਕ', 'ਇਹ', 'ਇਸ', 'ਉਹ', 'ਉਸ', 'ਓ',
+    'ਮੈਂ', 'ਤੁਸੀਂ', 'ਅਸੀਂ', 'ਉਸਦਾ', 'ਉਸਦੀ', 'ਮੇਰਾ', 'ਮੇਰੀ',
+    'ਤੁਹਾਡਾ', 'ਤੁਹਾਡੀ', 'ਸਾਡਾ', 'ਸਾਡੀ',
+    'ਕਰ', 'ਕਰਨ', 'ਕਰਦਾ', 'ਕਰਦੀ', 'ਹੁਣ',
+    # Hindi (shared helper, so the Hindi-source leg benefits too)
+    'है', 'हैं', 'था', 'थी', 'थे', 'हो', 'होगा', 'होगी',
+    'का', 'की', 'के', 'को', 'ने', 'से', 'में', 'तक', 'पर',
+    'और', 'या', 'पर', 'कि', 'जो', 'भी', 'ही', 'ना', 'नहीं',
+    'एक', 'यह', 'इस', 'वह', 'उस',
+    'मैं', 'तुम', 'हम', 'आप', 'उसका', 'उसकी', 'मेरा', 'मेरी',
+    'तुम्हारा', 'तुम्हारी', 'हमारा', 'हमारी',
+    'कर', 'करना', 'करता', 'करती', 'अभी',
+}
+
 class SentenceBasedSearcher:
     """Extract and create sentence-based search queries"""
 
@@ -181,8 +256,13 @@ class SentenceBasedSearcher:
             return []
 
         try:
-            # Tokenize into sentences
-            sentences = sent_tokenize(text)
+            # NLTK's punkt tokenizer is trained on English punctuation and
+            # does not recognise the Devanagari/Gurmukhi sentence-ending
+            # "।" (danda), so Hindi/Punjabi text with no ASCII "." lands in
+            # a single giant "sentence" - defeating sentence-based search.
+            # Prefer the Indic-aware splitter (also used for EBMT matching)
+            # and only fall back to sent_tokenize if it finds nothing.
+            sentences = split_into_sentences(text) or sent_tokenize(text)
 
             # Filter sentences by minimum word count
             valid_sentences = [
@@ -225,6 +305,50 @@ class SentenceBasedSearcher:
             print(f"   {i}. {q[:80]}..." if len(q) > 80 else f"   {i}. {q}")
 
         return search_queries if search_queries else [text[:150]]
+
+    def create_keyword_queries(self, text: str, num_queries: int = 5) -> List[str]:
+        """
+        Create keyword search queries the way a person actually searches
+        Google: drop the grammatical filler (pronouns, postpositions,
+        auxiliary verbs, conjunctions) and keep the distinctive content
+        words from each sentence, in their original order.
+
+        The earlier approach took a fixed 5-word window from the middle of
+        the sentence regardless of content, which often produced a phrase
+        made mostly of function words (e.g. "ਵਿੱਚ ਸਥਿਤ ਇੱਕ") - vague enough
+        that Google matches many loosely-related pages instead of the
+        actual topic. Stripping stopwords first keeps the query anchored to
+        what the sentence is actually about.
+
+        Args:
+            text: Input text
+            num_queries: Number of keyword queries to generate (one per
+                sentence, at most)
+
+        Returns:
+            List of natural, content-word keyword search queries
+        """
+        sentences = self.extract_sentences(text, top_n=num_queries)
+
+        keyword_queries = []
+        for sentence in sentences:
+            words = [re.sub(r'[.,!?;:\'"।]+$', '', w).strip() for w in sentence.split()]
+            content_words = [w for w in words if w and len(w) > 1 and w not in _INDIC_STOPWORDS]
+
+            if not content_words:
+                continue
+
+            # Keep at most 6 content words - enough to stay distinctive
+            # without turning back into a near-full-sentence query.
+            phrase = ' '.join(content_words[:6])
+            if len(phrase) > 6:
+                keyword_queries.append(phrase)
+
+        print(f"🔑 Created {len(keyword_queries)} keyword-based search queries (stopwords removed):")
+        for i, q in enumerate(keyword_queries, 1):
+            print(f"   {i}. {q}")
+
+        return keyword_queries[:num_queries]
 
     def create_hybrid_queries(self, text: str, num_queries: int = 5) -> List[Dict]:
         """
@@ -308,6 +432,12 @@ def load_models():
             model_cache['device'] = device
 
             print("✅ NLLB-200 model loaded successfully!")
+
+        # Load IndicTrans2, in its own separate environment/process - see
+        # start_indictrans2_worker() for why. Also loaded eagerly here (not
+        # lazily on first use) so it's warm before the first request, same
+        # as NLLB above.
+        start_indictrans2_worker()
 
         # Load Semantic Model for Cross-Language Detection.
         # Prefer our own IndicBERT fine-tuned on the Hindi-Punjabi parallel
@@ -737,11 +867,25 @@ def nmt_translate(hindi_sentence, tokenizer, model, device):
         inputs = tokenizer(hindi_sentence, return_tensors="pt", truncation=True, padding=True)
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
+        # A flat max_length=512 with plain greedy decoding and no repetition
+        # controls lets the model degenerate into looping the same phrase
+        # ("X, X, X, X...") once it exhausts real content for a short or
+        # ambiguous input - a well-known seq2seq failure mode. Beam search
+        # plus repetition controls fixes this, and capping the output
+        # length relative to the input (instead of a flat 512) means even
+        # a short sentence can't run away into hundreds of tokens.
+        input_len = inputs['input_ids'].shape[1]
+        max_new_tokens = min(200, max(20, input_len * 4))
+
         with torch.no_grad():
             generated_tokens = model.generate(
                 **inputs,
                 forced_bos_token_id=tokenizer.convert_tokens_to_ids(target_lang),
-                max_length=512
+                max_new_tokens=max_new_tokens,
+                num_beams=4,
+                no_repeat_ngram_size=3,
+                repetition_penalty=1.3,
+                early_stopping=True
             )
 
         translated_text = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
@@ -750,7 +894,136 @@ def nmt_translate(hindi_sentence, tokenizer, model, device):
     except Exception as e:
         return f"NMT Error: {str(e)}", -1.0
 
-def translate_hindi_to_punjabi(hindi_sentence):
+def _indictrans2_venv_python():
+    """Path to the separate IndicTrans2 venv's Python interpreter, or None if that venv doesn't exist yet."""
+    for rel in (os.path.join('bin', 'python'), os.path.join('Scripts', 'python.exe')):
+        candidate = os.path.join(INDICTRANS2_VENV_DIR, rel)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+def start_indictrans2_worker():
+    """
+    Start the IndicTrans2 worker as a long-lived subprocess in its own
+    Python environment, and block until it reports ready - so it is loaded
+    and warm from app startup (same as NLLB), not lazily on first request.
+
+    Runs in a SEPARATE venv from the rest of this app (from NLLB) because
+    AI4Bharat's trust_remote_code=True model/tokenizer code for IndicTrans2
+    targets transformers 4.x and is incompatible with the transformers 5.x
+    this app otherwise uses; isolating it sidesteps that entirely instead
+    of patching around each individual incompatibility one at a time.
+
+    Skips gracefully (the app keeps running with NLLB / Dictionary / EBMT)
+    if that venv hasn't been set up yet:
+
+        python3 -m venv indictrans2_env
+        indictrans2_env/bin/pip install -r requirements-indictrans2.txt
+    """
+    if os.getenv('SKIP_INDICTRANS2_MODEL', '').lower() in ('1', 'true', 'yes'):
+        print("\n📖 SKIP_INDICTRANS2_MODEL is set - skipping IndicTrans2 worker startup.")
+        model_cache['indictrans2_worker'] = None
+        return
+
+    python_exe = _indictrans2_venv_python()
+    if not python_exe:
+        print(f"\n📖 IndicTrans2: no venv found at '{INDICTRANS2_VENV_DIR}' - skipping "
+              f"(NLLB is still available). To enable IndicTrans2, set up its own environment:")
+        print(f"   python3 -m venv {INDICTRANS2_VENV_DIR}")
+        print(f"   {INDICTRANS2_VENV_DIR}/bin/pip install -r requirements-indictrans2.txt")
+        model_cache['indictrans2_worker'] = None
+        return
+
+    print(f"\n📖 Loading IndicTrans2 ({INDICTRANS2_MODEL_NAME}) in its own environment...")
+    print(f"   Python: {python_exe}")
+    print(f"   This is a separate transformers install from NLLB's - first load can take a while.")
+
+    try:
+        process = subprocess.Popen(
+            [python_exe, INDICTRANS2_WORKER_SCRIPT],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1
+        )
+
+        # Drain the worker's stderr into this process's own logs in the
+        # background - both so its load/error messages are visible here,
+        # and so the pipe never fills up and blocks the child.
+        def _drain_stderr(proc):
+            for line in proc.stderr:
+                print(f"   [indictrans2_worker] {line.rstrip()}")
+        threading.Thread(target=_drain_stderr, args=(process,), daemon=True).start()
+
+        ready_line = process.stdout.readline()
+        ready = False
+        if ready_line:
+            try:
+                ready = json.loads(ready_line).get('ready') is True
+            except json.JSONDecodeError:
+                ready = False
+
+        if ready:
+            model_cache['indictrans2_worker'] = process
+            model_cache['indictrans2_lock'] = threading.Lock()
+            print("✅ IndicTrans2 worker ready (separate environment)!")
+        else:
+            print(f"⚠️ IndicTrans2 worker did not report ready (got: {ready_line!r}) - "
+                  f"IndicTrans2 will be unavailable; NLLB is still available.")
+            print(f"   If the [indictrans2_worker] lines just above show a ModuleNotFoundError, "
+                  f"its dependencies aren't (fully) installed in {INDICTRANS2_VENV_DIR} - re-run:")
+            print(f"   {python_exe} -m pip install -r requirements-indictrans2.txt")
+            process.kill()
+            model_cache['indictrans2_worker'] = None
+
+    except Exception as e:
+        print(f"⚠️ Failed to start IndicTrans2 worker: {e}")
+        model_cache['indictrans2_worker'] = None
+
+def indictrans2_translate(hindi_sentence):
+    """
+    Neural Machine Translation using AI4Bharat's IndicTrans2 (indic-indic),
+    via the long-lived worker subprocess started by
+    start_indictrans2_worker() at app startup (see there for why it runs
+    in a separate environment).
+    """
+    process = model_cache.get('indictrans2_worker')
+    lock = model_cache.get('indictrans2_lock')
+    if not process or process.poll() is not None:
+        return "IndicTrans2 model not available", -1.0
+
+    try:
+        with lock:
+            process.stdin.write(json.dumps({'hindi_sentence': hindi_sentence}) + '\n')
+            process.stdin.flush()
+            response_line = process.stdout.readline()
+
+        if not response_line:
+            return "IndicTrans2 Error: worker process closed its output unexpectedly", -1.0
+
+        response = json.loads(response_line)
+        if 'error' in response:
+            return f"IndicTrans2 Error: {response['error']}", -1.0
+
+        return response['translation'], float(response.get('confidence', 0.95))
+
+    except Exception as e:
+        return f"IndicTrans2 Error: {str(e)}", -1.0
+
+def run_nmt(hindi_sentence: str, model_choice: str = DEFAULT_NMT_MODEL):
+    """
+    Dispatch Hindi->Punjabi neural translation to the selected NMT engine.
+
+    model_choice: 'nllb' (default, runs in-process, loaded eagerly at
+        startup - see load_models()) or 'indictrans2' (runs in its own
+        separate environment/process, also loaded eagerly at startup -
+        see start_indictrans2_worker()).
+    """
+    if model_choice == 'indictrans2':
+        return indictrans2_translate(hindi_sentence)
+    return nmt_translate(
+        hindi_sentence, model_cache.get('tokenizer'), model_cache.get('model'), model_cache.get('device')
+    )
+
+def translate_hindi_to_punjabi(hindi_sentence, model_choice: str = DEFAULT_NMT_MODEL):
     """Main translation function with cascade approach: Dictionary -> EBMT -> NMT"""
     print(f"\n🔄 Translating Hindi to Punjabi: '{hindi_sentence}'")
 
@@ -781,21 +1054,16 @@ def translate_hindi_to_punjabi(hindi_sentence):
         return ebmt_result, "EBMT"
 
     # 3. NMT as final fallback
-    print(f"⚠️ EBMT failed. Trying NMT...")
-    if not model_cache.get('loaded'):
+    print(f"⚠️ EBMT failed. Trying NMT ({model_choice})...")
+    if model_choice != 'indictrans2' and not model_cache.get('loaded'):
         return "Models not loaded", "None"
 
-    nmt_result, nmt_score = nmt_translate(
-        hindi_sentence,
-        model_cache['tokenizer'],
-        model_cache['model'],
-        model_cache['device']
-    )
+    nmt_result, nmt_score = run_nmt(hindi_sentence, model_choice=model_choice)
 
     print(f"✓ NMT translation: {nmt_result}")
     return nmt_result, "NMT"
 
-def translate_both_modes(hindi_sentence: str) -> Dict:
+def translate_both_modes(hindi_sentence: str, model_choice: str = DEFAULT_NMT_MODEL) -> Dict:
     """
     Run BOTH translation modes (EBMT and NMT) independently and return both
     outputs side-by-side, together with agreement metrics (BLEU and semantic
@@ -803,12 +1071,15 @@ def translate_both_modes(hindi_sentence: str) -> Dict:
     evaluation of example-based vs. neural machine translation, and for the
     "final output" of the system so a caller can see both modes rather than
     only the single cascade-selected translation.
+
+    model_choice selects the NMT engine used for the 'nmt' mode: 'nllb'
+    (default) or 'indictrans2'.
     """
     result = {
         'input': hindi_sentence,
         'dictionary': {'covered_fully': False, 'translation': None, 'untranslated_words': None},
         'ebmt': {'translation': None, 'similarity': None},
-        'nmt': {'translation': None, 'confidence': None},
+        'nmt': {'translation': None, 'confidence': None, 'engine': model_choice},
         'agreement': {},
         'recommended': None,
     }
@@ -834,11 +1105,9 @@ def translate_both_modes(hindi_sentence: str) -> Dict:
     result['ebmt']['translation'] = ebmt_text
     result['ebmt']['similarity'] = round(float(ebmt_score), 4) if ebmt_score is not None else None
 
-    # Mode 2: NMT
-    if model_cache.get('loaded'):
-        nmt_text, nmt_conf = nmt_translate(
-            hindi_sentence, model_cache['tokenizer'], model_cache['model'], model_cache['device']
-        )
+    # Mode 2: NMT (selected engine)
+    if model_choice == 'indictrans2' or model_cache.get('loaded'):
+        nmt_text, nmt_conf = run_nmt(hindi_sentence, model_choice=model_choice)
     else:
         nmt_text, nmt_conf = "Models not loaded", -1.0
     result['nmt']['translation'] = nmt_text
@@ -878,7 +1147,7 @@ def translate_both_modes(hindi_sentence: str) -> Dict:
     elif ebmt_valid and ebmt_score is not None and ebmt_score > 0.3:
         result['recommended'] = {'translation': ebmt_text, 'method': 'EBMT'}
     else:
-        result['recommended'] = {'translation': nmt_text, 'method': 'NMT'}
+        result['recommended'] = {'translation': nmt_text, 'method': 'NMT', 'engine': model_choice}
 
     return result
 
@@ -1034,7 +1303,7 @@ class EnhancedCorpusManager:
         except Exception as e:
             print(f"❌ Cache refresh error: {e}")
 
-    def search_corpus(self, query: str, top_k: int = 5, threshold: float = 0.55) -> List[Dict]:
+    def search_corpus(self, query: str, top_k: int = 5, threshold: float = PLAGIARISM_SIMILARITY_THRESHOLD) -> List[Dict]:
         """Search corpus for plagiarism matches"""
         try:
             print(f"\n🔍 Searching corpus for plagiarism...")
@@ -1098,9 +1367,144 @@ class EnhancedCorpusManager:
             print(f"❌ Corpus search error: {e}")
             return []
 
+    def search_corpus_bilingual(
+        self,
+        hindi_text: str,
+        translated_punjabi: str,
+        top_k: int = 10,
+        threshold: float = PLAGIARISM_SIMILARITY_THRESHOLD
+    ) -> List[Dict]:
+        """
+        Search the corpus using BOTH:
+          - the original Hindi source document
+          - its translated Punjabi version
+
+        A corpus document is matched if it is similar to either query, so a
+        plagiarized source is caught whether the corpus copy was kept in
+        Hindi or already translated to Punjabi. Results are merged and
+        deduplicated by filename, keeping the higher-similarity hit and
+        tagging which query language produced it.
+        """
+        merged: Dict[str, Dict] = {}
+
+        if hindi_text and hindi_text.strip():
+            print("\n📚 CORPUS SEARCH: ORIGINAL HINDI SOURCE DOCUMENT")
+            for m in self.search_corpus(hindi_text, top_k=top_k, threshold=threshold):
+                m = dict(m)
+                m['query_language'] = 'hindi'
+                existing = merged.get(m['filename'])
+                if existing is None or m['similarity'] > existing['similarity']:
+                    merged[m['filename']] = m
+
+        if translated_punjabi and translated_punjabi.strip():
+            print("\n📚 CORPUS SEARCH: TRANSLATED PUNJABI VERSION")
+            for m in self.search_corpus(translated_punjabi, top_k=top_k, threshold=threshold):
+                m = dict(m)
+                m['query_language'] = 'punjabi'
+                existing = merged.get(m['filename'])
+                if existing is None or m['similarity'] > existing['similarity']:
+                    merged[m['filename']] = m
+
+        results = sorted(merged.values(), key=lambda x: x['similarity'], reverse=True)
+        print(f"✅ Bilingual corpus search complete: {len(results)} unique document matches")
+        return results[:top_k]
+
 # ============================================================================
 # 5. ENHANCED INTERNET SEARCH WITH SENTENCE-BASED APPROACH
 # ============================================================================
+
+def _semantic_similarity(text_a: str, text_b: str) -> Optional[float]:
+    """
+    Real cross-lingual cosine similarity between two texts, using the same
+    fine-tuned IndicBERT / IndicSBERT model used for corpus matching -
+    instead of a fake, rank-based heuristic (e.g. "result #2 gets 0.87").
+
+    Returns None (rather than a made-up number) when the semantic model
+    isn't loaded or either text is empty, so callers can fall back to a
+    heuristic score explicitly instead of silently trusting a meaningless
+    default.
+    """
+    semantic_model = model_cache.get('semantic_model')
+    if not semantic_model or not text_a or not text_b:
+        return None
+    try:
+        embeddings = semantic_model.encode([text_a, text_b], normalize_embeddings=True)
+        return float(np.dot(embeddings[0], embeddings[1]))
+    except Exception as e:
+        print(f"⚠️ Semantic similarity computation failed: {e}")
+        return None
+
+def _keyword_overlap_similarity(query: str, text: str) -> float:
+    """
+    Fraction of the query's (non-stopword) words that actually appear in
+    the given text - a genuine keyword-relevance score for non-semantic
+    search modes, used instead of Google's rank position.
+
+    A rank-based score treats every result Google returns as progressively
+    "similar" regardless of content, so a loosely-related page that merely
+    ranked #1 for a vague query still scored ~0.85-0.95. Counting how many
+    of the actual searched-for words show up in the result's title/snippet
+    is how a natural keyword search judges relevance, and correctly scores
+    an off-topic result low even if Google ranked it first.
+    """
+    query_words = [
+        re.sub(r'[.,!?;:\'"।]+$', '', w).strip().lower()
+        for w in query.split()
+    ]
+    query_words = [w for w in query_words if len(w) > 1 and w not in _INDIC_STOPWORDS]
+    if not query_words:
+        return 0.0
+    text_lower = (text or '').lower()
+    hits = sum(1 for w in query_words if w in text_lower)
+    return hits / len(query_words)
+
+def _search_by_queries(
+    search_queries: List[str],
+    max_results: int = 30,
+    label: str = "queries",
+    use_semantic: bool = True
+) -> List[Dict]:
+    """
+    Run _perform_google_search for each query string and merge the results.
+
+    Each query is searched independently, so the same source URL can turn up
+    under several different queries. Instead of listing that source once per
+    matching query, combine those hits into a single entry: keep the highest
+    similarity score seen for that URL, and record how many queries matched
+    it.
+
+    use_semantic=False forces plain rank-based scoring (no cross-lingual
+    semantic model call) for keyword-only search modes.
+    """
+    if not search_queries:
+        return []
+
+    best_by_url: Dict[str, Dict] = {}
+    match_counts: Dict[str, int] = {}
+
+    for i, search_query in enumerate(search_queries, 1):
+        print(f"\n📌 Searching with {label} {i}/{len(search_queries)}: '{search_query[:80]}...'")
+        matches = _perform_google_search(
+            search_query, max_results // len(search_queries) + 2, use_semantic=use_semantic
+        )
+
+        for match in matches:
+            url = match.get('url')
+            if not url:
+                continue
+            match_counts[url] = match_counts.get(url, 0) + 1
+            existing = best_by_url.get(url)
+            if existing is None or match['similarity'] > existing['similarity']:
+                best_by_url[url] = match
+
+    all_matches = []
+    for url, match in best_by_url.items():
+        match = dict(match)
+        match['matched_sentence_count'] = match_counts[url]
+        all_matches.append(match)
+
+    all_matches.sort(key=lambda x: x['similarity'], reverse=True)
+    return all_matches[:max_results]
 
 def search_internet_google(query: str, max_results: int = 30, use_sentence_search: bool = True) -> List[Dict]:
     """
@@ -1125,28 +1529,45 @@ def search_internet_google(query: str, max_results: int = 30, use_sentence_searc
             sentence_searcher = model_cache['sentence_searcher']
             search_queries = sentence_searcher.create_sentence_queries(query, num_queries=5)
 
-        all_matches = []
-        seen_urls = set()
+        all_matches = _search_by_queries(search_queries, max_results=max_results, label="Query")
 
-        # Perform searches for each sentence
-        for i, search_query in enumerate(search_queries, 1):
-            print(f"\n📌 Searching with Query {i}/{len(search_queries)}: '{search_query[:80]}...'")
-            matches = _perform_google_search(search_query, max_results // len(search_queries) + 2)
-
-            for match in matches:
-                url = match['url']
-                if url not in seen_urls:  # Avoid duplicates
-                    seen_urls.add(url)
-                    all_matches.append(match)
-
-        # Sort by similarity and return top results
-        all_matches.sort(key=lambda x: x['similarity'], reverse=True)
-
-        print(f"\n✅ Internet search completed: {len(all_matches)} unique results found")
-        return all_matches[:max_results]
+        print(f"\n✅ Internet search completed: {len(all_matches)} unique sources found "
+              f"(from {len(search_queries)} sentence queries)")
+        return all_matches
 
     except Exception as e:
         print(f"❌ Internet search error: {e}")
+        traceback.print_exc()
+        return []
+
+def search_internet_google_keywords(query: str, max_results: int = 30, use_semantic: bool = True) -> List[Dict]:
+    """
+    Keyword-based internet search: short phrase queries extracted from the
+    text, as a complement to whole-sentence search. A full (often
+    machine-translated) sentence frequently fails to match anything
+    verbatim on Google, while a short distinctive phrase pulled from it is
+    far more likely to hit a real result.
+
+    use_semantic=False scores results by rank alone rather than calling the
+    cross-lingual semantic model.
+    """
+    try:
+        print(f"\n🌐 Searching Google with KEYWORD-BASED queries...")
+
+        search_queries = [query]
+        if model_cache.get('sentence_searcher'):
+            search_queries = model_cache['sentence_searcher'].create_keyword_queries(query, num_queries=5)
+
+        all_matches = _search_by_queries(
+            search_queries, max_results=max_results, label="Keyword query", use_semantic=use_semantic
+        )
+
+        print(f"\n✅ Keyword-based search completed: {len(all_matches)} unique sources found "
+              f"(from {len(search_queries)} keyword queries)")
+        return all_matches
+
+    except Exception as e:
+        print(f"❌ Keyword-based internet search error: {e}")
         traceback.print_exc()
         return []
 
@@ -1154,19 +1575,33 @@ def search_internet_bilingual(
     hindi_text: str,
     translated_punjabi: str,
     max_results: int = 30,
-    use_sentence_search: bool = True
+    use_sentence_search: bool = True,
+    hindi_similarity_threshold: Optional[float] = None
 ) -> List[Dict]:
     """
     Search the internet using BOTH:
       - original Hindi text
       - translated Punjabi text
 
-    Results are merged and deduplicated by URL.
-    """
-    all_matches: List[Dict] = []
-    seen_urls = set()
+    The Hindi leg is searched sentence-by-sentence (when use_sentence_search
+    is on), scored semantically, and filtered to hindi_similarity_threshold,
+    when given, so only strong matches for the original source surface.
 
-    # 1) Search with original Hindi text
+    The Punjabi (translated) leg is searched keyword-based ONLY (not
+    sentence-based): a full machine-translated sentence often fails to
+    match anything verbatim, while short distinctive phrases from it are
+    far more likely to hit a real result. It is scored by rank alone
+    (no semantic model call) and filtered to
+    PUNJABI_INTERNET_SIMILARITY_THRESHOLD.
+
+    Results are merged and deduplicated by URL, keeping the higher-similarity
+    hit (rather than whichever language happened to find it first) so the
+    same source is never listed twice.
+    """
+    best_by_url: Dict[str, Dict] = {}
+
+    # 1) Search with original Hindi text - sentence-based, semantic scoring,
+    #    filtered to the similarity threshold.
     if hindi_text and hindi_text.strip():
         print("\n🌐 INTERNET SEARCH: ORIGINAL HINDI TEXT")
         hindi_matches = search_internet_google(
@@ -1174,49 +1609,68 @@ def search_internet_bilingual(
             max_results=max_results,
             use_sentence_search=use_sentence_search
         )
+        if hindi_similarity_threshold is not None:
+            hindi_matches = [m for m in hindi_matches if m.get('similarity', 0.0) >= hindi_similarity_threshold]
         for m in hindi_matches:
             url = m.get("url")
-            if not url or url in seen_urls:
+            if not url:
                 continue
-            seen_urls.add(url)
             m = dict(m)
             m["query_language"] = "hindi"
-            all_matches.append(m)
+            existing = best_by_url.get(url)
+            if existing is None or m.get("similarity", 0.0) > existing.get("similarity", 0.0):
+                best_by_url[url] = m
 
-    # 2) Search with translated Punjabi text
+    # 2) Search with translated Punjabi text - keyword-based only, rank-based
+    #    scoring (no semantic model call), filtered to
+    #    PUNJABI_INTERNET_SIMILARITY_THRESHOLD.
     if translated_punjabi and translated_punjabi.strip():
-        print("\n🌐 INTERNET SEARCH: TRANSLATED PUNJABI TEXT")
-        punjabi_matches = search_internet_google(
+        print("\n🌐 INTERNET SEARCH: TRANSLATED PUNJABI TEXT (keyword-based only, "
+              f"threshold {PUNJABI_INTERNET_SIMILARITY_THRESHOLD})")
+        punjabi_matches = search_internet_google_keywords(
             translated_punjabi,
             max_results=max_results,
-            use_sentence_search=use_sentence_search
+            use_semantic=False
         )
+        punjabi_matches = [
+            m for m in punjabi_matches if m.get('similarity', 0.0) >= PUNJABI_INTERNET_SIMILARITY_THRESHOLD
+        ]
         for m in punjabi_matches:
             url = m.get("url")
-            if not url or url in seen_urls:
+            if not url:
                 continue
-            seen_urls.add(url)
             m = dict(m)
             m["query_language"] = "punjabi"
-            all_matches.append(m)
+            existing = best_by_url.get(url)
+            if existing is None or m.get("similarity", 0.0) > existing.get("similarity", 0.0):
+                best_by_url[url] = m
 
-    # Sort combined list by similarity and trim
-    all_matches.sort(key=lambda x: x.get("similarity", 0.0), reverse=True)
-    print(f"\n✅ Bilingual internet search complete: {len(all_matches)} unique results")
+    # Sort combined list by (maximum) similarity and trim
+    all_matches = sorted(best_by_url.values(), key=lambda x: x.get("similarity", 0.0), reverse=True)
+    print(f"\n✅ Bilingual internet search complete: {len(all_matches)} unique sources")
     return all_matches[:max_results]
 
-def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
+def _perform_google_search(query: str, max_results: int = 10, use_semantic: bool = True) -> List[Dict]:
     """
     Perform actual Google search for a single query
 
     Args:
         query: Search query
         max_results: Maximum results to return
+        use_semantic: If False, score results by rank alone instead of
+            calling the cross-lingual semantic model (used for keyword-only
+            search modes).
 
     Returns:
         List of search results
     """
     matches = []
+    # Set once the Google Custom Search API actually returns a valid (200)
+    # response, whether or not it contained any items - "the API works"
+    # means the request itself succeeded, not that it happened to find a
+    # match. Used below to skip the simulated/fake fallback: simulated data
+    # is only appropriate when no real search actually ran.
+    google_api_worked = False
 
     try:
         # API credentials are read from the environment - never hardcode
@@ -1253,26 +1707,63 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                 print(f"   Response Status: {response.status_code}")
 
                 if response.status_code == 200:
+                    google_api_worked = True
                     data = response.json()
                     results = data.get('items', [])
 
                     print(f"   ✅ SUCCESS: Got {len(results)} results from Google API")
 
-
                     for idx, item in enumerate(results):
+                        title = item.get('title', 'No title')
+                        snippet = item.get('snippet', 'No preview available')
+                        combined_text = f"{title} {snippet}"
+                        if use_semantic:
+                            # Real semantic similarity between the query and
+                            # this result's title+snippet, using the
+                            # cross-lingual IndicBERT/IndicSBERT model -
+                            # falls back to a rank-based estimate only when
+                            # the model isn't loaded.
+                            sim = _semantic_similarity(query, combined_text)
+                            similarity_method = 'semantic' if sim is not None else 'rank_estimate'
+                            if sim is None:
+                                sim = max(0.8, 0.95 - (idx * 0.08))
+                        else:
+                            # Keyword-only mode: score by how many of the
+                            # actual query words appear in the result,
+                            # instead of trusting Google's rank position -
+                            # a loosely-related top result should not score
+                            # as if it were a strong match.
+                            sim = _keyword_overlap_similarity(query, combined_text)
+                            similarity_method = 'keyword_overlap'
                         match = {
                             'source': 'internet',
                             'url': item.get('link', ''),
-                            'title': item.get('title', 'No title'),
-                            'similarity': max(0.8, 0.95 - (idx * 0.08)),
-                            'snippet': item.get('snippet', 'No preview available'),
+                            'title': title,
+                            'similarity': sim,
+                            'similarity_method': similarity_method,
+                            'snippet': snippet,
                             'search_method': 'google_api'
                         }
                         matches.append(match)
 
-                    print(f"✅ Returning {len(matches)} Google API results")
+                    if matches:
+                        print(f"✅ Returning {len(matches)} Google API results")
+                        return matches
 
-                    return matches
+                    # A 200 status with zero items is a "successful" call that
+                    # found nothing - do NOT stop here. The most common cause
+                    # is that the Custom Search Engine (cx) is restricted to
+                    # a handful of sites instead of the whole web: a brand
+                    # new CSE defaults to that unless "Search the entire web"
+                    # is explicitly enabled, so it can return 0 results for a
+                    # query that finds real pages on google.com itself. Fall
+                    # through to SerpAPI / simulated results below instead of
+                    # silently returning an empty list.
+                    print(f"   ⚠️ Google API returned 0 results for this query, even though the "
+                          f"request succeeded. If a manual Google search finds real matches, check "
+                          f"that Custom Search Engine cx={search_engine_id} has 'Search the entire "
+                          f"web' enabled at https://programmablesearchengine.google.com/ - a new CSE "
+                          f"is restricted to specific sites by default.")
 
                 elif response.status_code == 403:
                     print(f"   ❌ 403 Forbidden - API Key or Search Engine ID invalid")
@@ -1341,18 +1832,34 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                     print(f"   ✅ SUCCESS: Got {len(results)} results from SerpAPI")
 
                     for idx, item in enumerate(results):
+                        title = item.get('title', 'No title')
+                        snippet = item.get('snippet', 'No preview available')
+                        combined_text = f"{title} {snippet}"
+                        if use_semantic:
+                            sim = _semantic_similarity(query, combined_text)
+                            similarity_method = 'semantic' if sim is not None else 'rank_estimate'
+                            if sim is None:
+                                sim = max(0.5, 0.85 - (idx * 0.08))
+                        else:
+                            sim = _keyword_overlap_similarity(query, combined_text)
+                            similarity_method = 'keyword_overlap'
                         match = {
                             'source': 'internet',
                             'url': item.get('link', ''),
-                            'title': item.get('title', 'No title'),
-                            'similarity': max(0.5, 0.85 - (idx * 0.08)),
-                            'snippet': item.get('snippet', 'No preview available'),
+                            'title': title,
+                            'similarity': sim,
+                            'similarity_method': similarity_method,
+                            'snippet': snippet,
                             'search_method': 'serpapi'
                         }
                         matches.append(match)
 
-                    print(f"✅ Returning {len(matches)} SerpAPI results")
-                    return matches
+                    if matches:
+                        print(f"✅ Returning {len(matches)} SerpAPI results")
+                        return matches
+
+                    print(f"   ⚠️ SerpAPI returned 0 results for this query - falling through to "
+                          f"simulated results.")
 
                 elif response.status_code == 403:
                     print(f"   ❌ 403 Forbidden - SerpAPI Key invalid")
@@ -1383,6 +1890,17 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
             print(f"   Set with: export SERPAPI_KEY=\"your_key\"  (macOS/Linux)")
 
         # ===== METHOD 3: FALLBACK TO SIMULATION =====
+        # Only used when NO real search actually ran (no API configured, or
+        # every configured API failed outright - bad key, quota, network
+        # error). If the Google API responded successfully at all - even
+        # with zero items for this particular query - that's a real,
+        # truthful "no matches found" and must not be replaced with fake
+        # data that could be mistaken for a genuine match.
+        if google_api_worked:
+            print(f"\n📝 Google API responded successfully but found no results for this query - "
+                  f"returning no matches instead of simulated/fake data.")
+            return matches
+
         print(f"\n📝 All real APIs unavailable - using simulated results")
         print(f"   (This is FAKE data for testing)")
 
@@ -1491,6 +2009,7 @@ def upload_document_plagiarism():
             return jsonify({'success': False, 'error': f'File type not allowed. Allowed: {", ".join(app.config["ALLOWED_EXTENSIONS"])}'}), 400
 
         use_sentence_search = request.form.get('use_sentence_search', 'true').lower() != 'false'
+        nmt_model = _resolve_nmt_model(request.form.get('nmt_model'))
 
         # Save uploaded file
         filename = safe_upload_filename(file.filename)
@@ -1510,7 +2029,7 @@ def upload_document_plagiarism():
 
         print(f"✅ Document extracted: {len(content)} characters")
 
-        response_data = run_plagiarism_pipeline(content, use_sentence_search)
+        response_data = run_plagiarism_pipeline(content, use_sentence_search, nmt_model=nmt_model)
         response_data['filename'] = filename
         response_data['character_count'] = len(content)
         response_data['word_count'] = len(content.split())
@@ -1582,11 +2101,18 @@ def upload_document_corpus():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
-def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -> Dict:
+def run_plagiarism_pipeline(
+    hindi_text: str,
+    use_sentence_search: bool = True,
+    nmt_model: str = DEFAULT_NMT_MODEL
+) -> Dict:
     """
     Core plagiarism-check pipeline shared by the text-input and
     document-upload endpoints: translate (both EBMT and NMT modes) → corpus
     matching → sentence-based internet search → summary + DB logging.
+
+    nmt_model selects the NMT engine ('nllb' or 'indictrans2') used for the
+    NMT translation mode.
     """
     print("\n" + "=" * 80)
     print("PLAGIARISM CHECK STARTED")
@@ -1595,24 +2121,43 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     start_time = datetime.now()
 
     # =========== STEP 1: TRANSLATE (BOTH MODES) ===========
-    print("\n[STEP 1] HINDI TO PUNJABI TRANSLATION (DICTIONARY + EBMT + NMT)")
+    print(f"\n[STEP 1] HINDI TO PUNJABI TRANSLATION (DICTIONARY + EBMT + NMT/{nmt_model})")
     print("-" * 80)
 
-    both_modes = translate_both_modes(hindi_text)
+    both_modes = translate_both_modes(hindi_text, model_choice=nmt_model)
     translated_punjabi = both_modes['recommended']['translation']
     translation_method = both_modes['recommended']['method']
 
-    # =========== STEP 2: CORPUS PLAGIARISM CHECK ===========
-    print("\n[STEP 2] CROSS-LANGUAGE PLAGIARISM CHECK - CORPUS")
+    # =========== STEP 2: CORPUS PLAGIARISM CHECK (BILINGUAL) ===========
+    # Compares the original Hindi source document AND its translated
+    # Punjabi version against the corpus, so a match is caught whether the
+    # corpus copy of the source is still in Hindi or already in Punjabi.
+    print("\n[STEP 2] CROSS-LANGUAGE PLAGIARISM CHECK - CORPUS (HINDI + PUNJABI)")
     print("-" * 80)
 
-    corpus_matches = corpus_manager.search_corpus(translated_punjabi, top_k=10, threshold=0.55)
+    corpus_matches = corpus_manager.search_corpus_bilingual(
+        hindi_text, translated_punjabi, top_k=10, threshold=PLAGIARISM_SIMILARITY_THRESHOLD
+    )
+    corpus_matches_hindi = [m for m in corpus_matches if m.get('query_language') == 'hindi']
+    corpus_matches_punjabi = [m for m in corpus_matches if m.get('query_language') == 'punjabi']
 
-    # =========== STEP 3: INTERNET SEARCH (GOOGLE) WITH SENTENCE-BASED APPROACH ===========
-    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED FOR TRANSLATED CONTENT")
+    # =========== STEP 3: INTERNET SEARCH (GOOGLE) - ORIGINAL HINDI + TRANSLATED PUNJABI ===========
+    # Searches the internet with BOTH the original Hindi source document and
+    # its Punjabi translation, each carrying its own similarity %, instead
+    # of only searching the translated text. The Hindi leg is sentence-based
+    # with semantic scoring, filtered to PLAGIARISM_SIMILARITY_THRESHOLD; the
+    # Punjabi (translated) leg is keyword-based only, with rank-based (non-
+    # semantic) scoring, filtered to PUNJABI_INTERNET_SIMILARITY_THRESHOLD.
+    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - HINDI SOURCE (sentence-based, semantic, thresholded) "
+          "+ PUNJABI TRANSLATION (keyword-based, rank-based, thresholded)")
     print("-" * 80)
 
-    internet_matches = search_internet_google(translated_punjabi, max_results=30, use_sentence_search=use_sentence_search)
+    internet_matches = search_internet_bilingual(
+        hindi_text, translated_punjabi, max_results=30, use_sentence_search=use_sentence_search,
+        hindi_similarity_threshold=PLAGIARISM_SIMILARITY_THRESHOLD
+    )
+    internet_matches_hindi = [m for m in internet_matches if m.get('query_language') == 'hindi']
+    internet_matches_punjabi = [m for m in internet_matches if m.get('query_language') == 'punjabi']
 
     #=========== PREPARE RESPONSE ===========
     processing_time = (datetime.now() - start_time).total_seconds()
@@ -1626,18 +2171,30 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
         # final output is not limited to a single cascade winner.
         'translation_modes': both_modes,
 
-        # Corpus Results
+        # Corpus Results - searched with both the original Hindi source
+        # document and its translated Punjabi version.
         'corpus_results': {
             'total_matches': len(corpus_matches),
             'matches': corpus_matches[:5],
-            'max_similarity': max([m['similarity'] for m in corpus_matches], default=0)
+            'max_similarity': max([m['similarity'] for m in corpus_matches], default=0),
+            'hindi_matches': len(corpus_matches_hindi),
+            'punjabi_matches': len(corpus_matches_punjabi),
+            'max_similarity_hindi': max([m['similarity'] for m in corpus_matches_hindi], default=0),
+            'max_similarity_punjabi': max([m['similarity'] for m in corpus_matches_punjabi], default=0),
+            'compared_against': ['original_hindi_source', 'translated_punjabi']
         },
 
-        # Internet Results
+        # Internet Results - searched with both the original Hindi source
+        # document and its translated Punjabi version, each with its own
+        # similarity %.
         'internet_results': {
             'total_matches': len(internet_matches),
             'matches': internet_matches[:40],
             'max_similarity': max([m['similarity'] for m in internet_matches], default=0),
+            'hindi_matches': len(internet_matches_hindi),
+            'punjabi_matches': len(internet_matches_punjabi),
+            'max_similarity_hindi': max([m['similarity'] for m in internet_matches_hindi], default=0),
+            'max_similarity_punjabi': max([m['similarity'] for m in internet_matches_punjabi], default=0),
             'search_method': 'sentence-based' if use_sentence_search else 'keyword-based'
         },
 
@@ -1648,6 +2205,8 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
             'internet_matches': len(internet_matches),
             'highest_corpus_similarity': max([m['similarity'] for m in corpus_matches], default=0),
             'highest_internet_similarity': max([m['similarity'] for m in internet_matches], default=0),
+            'highest_internet_similarity_hindi': max([m['similarity'] for m in internet_matches_hindi], default=0),
+            'highest_internet_similarity_punjabi': max([m['similarity'] for m in internet_matches_punjabi], default=0),
             'overall_similarity': max(
                 max([m['similarity'] for m in corpus_matches], default=0),
                 max([m['similarity'] for m in internet_matches], default=0)
@@ -1702,11 +2261,12 @@ def plagiarism_check_text():
         data = request.get_json()
         hindi_text = data.get('hindi_text', '').strip()
         use_sentence_search = data.get('use_sentence_search', True)
+        nmt_model = _resolve_nmt_model(data.get('nmt_model'))
 
         if not hindi_text:
             return jsonify({'error': 'No Hindi text provided'}), 400
 
-        return jsonify(run_plagiarism_pipeline(hindi_text, use_sentence_search))
+        return jsonify(run_plagiarism_pipeline(hindi_text, use_sentence_search, nmt_model=nmt_model))
 
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -1724,11 +2284,12 @@ def translate_compare():
     try:
         data = request.get_json()
         hindi_text = data.get('hindi_text', '').strip()
+        nmt_model = _resolve_nmt_model(data.get('nmt_model'))
 
         if not hindi_text:
             return jsonify({'error': 'No Hindi text provided'}), 400
 
-        result = translate_both_modes(hindi_text)
+        result = translate_both_modes(hindi_text, model_choice=nmt_model)
         return jsonify({'success': True, **result})
 
     except Exception as e:
@@ -1847,6 +2408,93 @@ def get_corpus_stats():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/history/list', methods=['GET'])
+def list_history():
+    """Get recent plagiarism-check history (text-input and document-upload checks)"""
+    try:
+        conn = sqlite3.connect('corpus_database.db')
+        cursor = conn.cursor()
+
+        cursor.execute('''SELECT id, query_content, query_language, corpus_matches,
+            max_corpus_similarity, internet_matches, max_internet_similarity,
+            processing_time, check_timestamp, search_method
+            FROM plagiarism_checks
+            ORDER BY check_timestamp DESC
+            LIMIT 100''')
+
+        results = cursor.fetchall()
+        conn.close()
+
+        history = []
+        for row in results:
+            history.append({
+                'id': row[0],
+                'query_preview': (row[1] or '')[:150],
+                'query_language': row[2],
+                'corpus_matches': row[3],
+                'max_corpus_similarity': row[4],
+                'internet_matches': row[5],
+                'max_internet_similarity': row[6],
+                'processing_time': row[7],
+                'check_timestamp': row[8],
+                'search_method': row[9]
+            })
+
+        print(f"✅ Retrieved {len(history)} plagiarism-check history entries")
+        return jsonify({'history': history})
+
+    except Exception as e:
+        print(f"❌ Error listing history: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/history/<int:check_id>', methods=['GET'])
+def get_history_detail(check_id):
+    """Get the full stored result for one past plagiarism check, for re-viewing."""
+    try:
+        conn = sqlite3.connect('corpus_database.db')
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT results_json FROM plagiarism_checks WHERE id = ?', (check_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row or not row[0]:
+            return jsonify({'error': 'History entry not found'}), 404
+
+        return jsonify(json.loads(row[0]))
+
+    except Exception as e:
+        print(f"❌ Error fetching history detail: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/history/delete', methods=['POST'])
+def delete_history_entry():
+    """Delete a plagiarism-check history entry"""
+    try:
+        data = request.get_json()
+        check_id = data.get('id')
+
+        if not check_id:
+            return jsonify({'success': False, 'error': 'No id provided'}), 400
+
+        conn = sqlite3.connect('corpus_database.db')
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM plagiarism_checks WHERE id = ?', (check_id,))
+
+        if cursor.rowcount > 0:
+            conn.commit()
+            conn.close()
+            print(f"✅ History entry deleted: {check_id}")
+            return jsonify({'success': True, 'message': f'History entry {check_id} deleted'})
+        else:
+            conn.close()
+            print(f"❌ History entry not found: {check_id}")
+            return jsonify({'success': False, 'message': 'History entry not found'}), 404
+
+    except Exception as e:
+        print(f"❌ Error deleting history entry: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check"""
@@ -1857,6 +2505,13 @@ def health():
         'dictionary_size': len(translation_dict),
         'ebmt_corpus_size': len(parallel_corpus),
         'corpus_size': corpus_cache['corpus_size'],
+        'nmt_models': {
+            'nllb': model_cache.get('model') is not None,
+            'indictrans2': (
+                model_cache.get('indictrans2_worker') is not None
+                and model_cache['indictrans2_worker'].poll() is None
+            ),
+        },
         'timestamp': datetime.now().isoformat()
     })
 
