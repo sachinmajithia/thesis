@@ -897,6 +897,26 @@ def load_indictrans2_model():
     print("\n📖 Loading IndicTrans2 (indic-indic) Translation Model...")
     print(f"   Model: {INDICTRANS2_MODEL_NAME}")
 
+    # IndicTransToolkit 1.1.1's collator.py does
+    # "from transformers.tokenization_utils import PreTrainedTokenizerBase",
+    # a module path that no longer exposes that name on transformers>=5
+    # (confirmed: transformers 5.x turned transformers.tokenization_utils
+    # into a lazy/virtual module - PreTrainedTokenizerBase now lives at the
+    # transformers top level instead). That breaks IndicTransToolkit's
+    # import chain with "ImportError: cannot import name
+    # 'PreTrainedTokenizerBase' from 'transformers.tokenization_utils'"
+    # even though both packages are installed correctly. Patch the name
+    # back onto that module before importing IndicTransToolkit, rather
+    # than requiring the whole app to pin an older transformers just for
+    # this one optional NMT engine.
+    try:
+        import transformers.tokenization_utils as _tok_utils
+        if not hasattr(_tok_utils, 'PreTrainedTokenizerBase'):
+            from transformers import PreTrainedTokenizerBase as _PTB
+            _tok_utils.PreTrainedTokenizerBase = _PTB
+    except Exception as e:
+        print(f"⚠️ Could not apply the transformers>=5 compatibility shim for IndicTransToolkit: {e}")
+
     # IndicTransToolkit/__init__.py eagerly imports its evaluator (which
     # needs indic-nlp-library and sacrebleu) and collator (which needs
     # transformers) submodules, so importing IndicProcessor at all - via
