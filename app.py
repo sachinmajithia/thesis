@@ -968,6 +968,9 @@ def start_indictrans2_worker():
         else:
             print(f"⚠️ IndicTrans2 worker did not report ready (got: {ready_line!r}) - "
                   f"IndicTrans2 will be unavailable; NLLB is still available.")
+            print(f"   If the [indictrans2_worker] lines just above show a ModuleNotFoundError, "
+                  f"its dependencies aren't (fully) installed in {INDICTRANS2_VENV_DIR} - re-run:")
+            print(f"   {python_exe} -m pip install -r requirements-indictrans2.txt")
             process.kill()
             model_cache['indictrans2_worker'] = None
 
