@@ -169,7 +169,7 @@
       <h2>Plagiarism Check — Text Input</h2>
       <p class="hint">Translates the Hindi input (both modes), then matches the translated Punjabi against the local corpus and the internet.</p>
       <textarea id="checkInput" placeholder="यहाँ हिंदी टेक्स्ट लिखें..."></textarea><br>
-      <label class="check"><input type="checkbox" id="checkSentenceSearch" checked> Use sentence-based internet search</label><br>
+      <label class="check"><input type="checkbox" id="checkSentenceSearch" checked> Use multi-query internet search</label><br>
       <button class="primary" id="btnCheck" onclick="runPlagiarismCheck()">Run Plagiarism Check</button>
       <div class="loading" id="checkLoading" style="display:none;">Running translation + corpus + internet search…</div>
     </div>
@@ -183,7 +183,7 @@
       <p class="hint">Upload a .txt, .pdf, .docx or .doc file. The extracted text runs through the full translation + corpus + internet pipeline.</p>
       <div class="drop-zone" id="dropZonePlag">Drag &amp; drop a file here, or click to choose one<br><input type="file" id="fileInputPlag" accept=".txt,.pdf,.docx,.doc" style="display:none;"></div>
       <div id="filenameChipPlag"></div>
-      <label class="check"><input type="checkbox" id="uploadSentenceSearch" checked> Use sentence-based internet search</label><br>
+      <label class="check"><input type="checkbox" id="uploadSentenceSearch" checked> Use multi-query internet search</label><br>
       <button class="primary" id="btnUploadCheck" onclick="runUploadPlagiarism()">Upload &amp; Check</button>
       <div class="loading" id="uploadCheckLoading" style="display:none;">Extracting text and running full check…</div>
     </div>
@@ -392,7 +392,6 @@ function renderModesHtml(modes) {
 // ---------------------------------------------------------------------------
 function queryLangBadge(lang) {
   if (lang === 'hindi') return badge('Matched via: Hindi source', 'amber');
-  if (lang === 'punjabi') return badge('Matched via: Punjabi translation', 'blue');
   return '';
 }
 
@@ -417,7 +416,7 @@ function renderInternetMatch(m) {
       <div class="title-row">
         <a href="${escapeHtml(m.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(m.title || m.url)}</a>
         ${badge(m.search_method || 'unknown', m.search_method === 'simulated' ? 'amber' : 'teal')}
-        ${m.similarity_method === 'semantic' ? badge('Semantic similarity', 'blue') : (m.similarity_method === 'rank_estimate' ? badge('Estimated (rank-based)', 'gray') : '')}
+        ${m.similarity_method === 'rank_estimate' ? badge('Estimated (rank-based)', 'gray') : ''}
         ${queryLangBadge(m.query_language)}
         ${queryHitCount > 1 ? badge(`Matched ${queryHitCount} queries · max similarity shown`, 'gray') : ''}
       </div>
@@ -470,7 +469,7 @@ function renderPlagiarismResult(data) {
   }
   html += `</div>`;
 
-  html += `<div class="card"><h2>Internet Matches (${internet.total_matches}) ${badge(internet.search_method, 'blue')}</h2>
+  html += `<div class="card"><h2>Internet Matches (${internet.total_matches})</h2>
     <p style="font-size:12.5px;color:var(--muted);margin-top:-6px;">Searched the internet using the original Hindi source document sentence-by-sentence with semantic scoring (${internet.hindi_matches || 0} matches, filtered to ≥80% similarity), and the translated Punjabi version keyword-based with rank-based scoring (${internet.punjabi_matches || 0} matches, filtered to ≥65% similarity).</p>`;
   if (internet.matches && internet.matches.length) {
     html += internet.matches.slice(0, 15).map(renderInternetMatch).join('');
