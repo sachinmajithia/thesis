@@ -187,6 +187,30 @@ def split_into_sentences(text):
         return []
     return [s.strip() for s in _SENTENCE_END_RE.split(text) if s.strip()]
 
+# Common Punjabi/Hindi function words (pronouns, postpositions, auxiliary
+# verbs, conjunctions) - stripped out when building keyword search queries.
+# A real person searching Google types the distinctive content words from a
+# sentence, not its grammatical filler; leaving stopwords in produces vague
+# queries that match loosely-related pages instead of the actual topic.
+_INDIC_STOPWORDS = {
+    # Punjabi
+    'ਹੈ', 'ਹਨ', 'ਸੀ', 'ਸਨ', 'ਹੋ', 'ਹੋਵੇ', 'ਹੋਵੇਗਾ', 'ਹੋਵੇਗੀ',
+    'ਦਾ', 'ਦੀ', 'ਦੇ', 'ਨੂੰ', 'ਨੇ', 'ਤੇ', 'ਤੋਂ', 'ਵਿੱਚ', 'ਵਿਚ', 'ਨਾਲ', 'ਲਈ',
+    'ਅਤੇ', 'ਜਾਂ', 'ਪਰ', 'ਕਿ', 'ਜੋ', 'ਵੀ', 'ਹੀ', 'ਨਾ',
+    'ਇੱਕ', 'ਇਹ', 'ਇਸ', 'ਉਹ', 'ਉਸ', 'ਓ',
+    'ਮੈਂ', 'ਤੁਸੀਂ', 'ਅਸੀਂ', 'ਉਸਦਾ', 'ਉਸਦੀ', 'ਮੇਰਾ', 'ਮੇਰੀ',
+    'ਤੁਹਾਡਾ', 'ਤੁਹਾਡੀ', 'ਸਾਡਾ', 'ਸਾਡੀ',
+    'ਕਰ', 'ਕਰਨ', 'ਕਰਦਾ', 'ਕਰਦੀ', 'ਹੁਣ',
+    # Hindi (shared helper, so the Hindi-source leg benefits too)
+    'है', 'हैं', 'था', 'थी', 'थे', 'हो', 'होगा', 'होगी',
+    'का', 'की', 'के', 'को', 'ने', 'से', 'में', 'तक', 'पर',
+    'और', 'या', 'पर', 'कि', 'जो', 'भी', 'ही', 'ना', 'नहीं',
+    'एक', 'यह', 'इस', 'वह', 'उस',
+    'मैं', 'तुम', 'हम', 'आप', 'उसका', 'उसकी', 'मेरा', 'मेरी',
+    'तुम्हारा', 'तुम्हारी', 'हमारा', 'हमारी',
+    'कर', 'करना', 'करता', 'करती', 'अभी',
+}
+
 class SentenceBasedSearcher:
     """Extract and create sentence-based search queries"""
 
@@ -260,15 +284,17 @@ class SentenceBasedSearcher:
 
     def create_keyword_queries(self, text: str, num_queries: int = 5) -> List[str]:
         """
-        Create short keyword/phrase search queries, as a complement to
-        whole-sentence queries.
+        Create keyword search queries the way a person actually searches
+        Google: drop the grammatical filler (pronouns, postpositions,
+        auxiliary verbs, conjunctions) and keep the distinctive content
+        words from each sentence, in their original order.
 
-        A full sentence - especially a machine-translated one - often fails
-        to match anything verbatim on Google, since the exact wording rarely
-        exists elsewhere on the web. A short, distinctive phrase pulled from
-        that sentence is far more likely to hit a real result, so Punjabi
-        internet search runs both sentence-based AND keyword-based queries
-        rather than relying on sentence matching alone.
+        The earlier approach took a fixed 5-word window from the middle of
+        the sentence regardless of content, which often produced a phrase
+        made mostly of function words (e.g. "ਵਿੱਚ ਸਥਿਤ ਇੱਕ") - vague enough
+        that Google matches many loosely-related pages instead of the
+        actual topic. Stripping stopwords first keeps the query anchored to
+        what the sentence is actually about.
 
         Args:
             text: Input text
@@ -276,27 +302,25 @@ class SentenceBasedSearcher:
                 sentence, at most)
 
         Returns:
-            List of short keyword-phrase search queries
+            List of natural, content-word keyword search queries
         """
         sentences = self.extract_sentences(text, top_n=num_queries)
 
         keyword_queries = []
         for sentence in sentences:
-            words = sentence.split()
-            if len(words) <= 5:
-                phrase = sentence.strip()
-            else:
-                # The middle of a sentence tends to carry the distinctive
-                # content words, skipping generic sentence-leading/trailing
-                # words (subjects, closing verbs) that add little to a search.
-                start = max(0, (len(words) - 5) // 2)
-                phrase = ' '.join(words[start:start + 5])
+            words = [re.sub(r'[.,!?;:\'"।]+$', '', w).strip() for w in sentence.split()]
+            content_words = [w for w in words if w and len(w) > 1 and w not in _INDIC_STOPWORDS]
 
-            clean_phrase = re.sub(r'[.,!?;:\'"।]+$', '', phrase).strip()
-            if len(clean_phrase) > 8:
-                keyword_queries.append(clean_phrase)
+            if not content_words:
+                continue
 
-        print(f"🔑 Created {len(keyword_queries)} keyword-based search queries:")
+            # Keep at most 6 content words - enough to stay distinctive
+            # without turning back into a near-full-sentence query.
+            phrase = ' '.join(content_words[:6])
+            if len(phrase) > 6:
+                keyword_queries.append(phrase)
+
+        print(f"🔑 Created {len(keyword_queries)} keyword-based search queries (stopwords removed):")
         for i, q in enumerate(keyword_queries, 1):
             print(f"   {i}. {q}")
 
@@ -1241,6 +1265,30 @@ def _semantic_similarity(text_a: str, text_b: str) -> Optional[float]:
         print(f"⚠️ Semantic similarity computation failed: {e}")
         return None
 
+def _keyword_overlap_similarity(query: str, text: str) -> float:
+    """
+    Fraction of the query's (non-stopword) words that actually appear in
+    the given text - a genuine keyword-relevance score for non-semantic
+    search modes, used instead of Google's rank position.
+
+    A rank-based score treats every result Google returns as progressively
+    "similar" regardless of content, so a loosely-related page that merely
+    ranked #1 for a vague query still scored ~0.85-0.95. Counting how many
+    of the actual searched-for words show up in the result's title/snippet
+    is how a natural keyword search judges relevance, and correctly scores
+    an off-topic result low even if Google ranked it first.
+    """
+    query_words = [
+        re.sub(r'[.,!?;:\'"।]+$', '', w).strip().lower()
+        for w in query.split()
+    ]
+    query_words = [w for w in query_words if len(w) > 1 and w not in _INDIC_STOPWORDS]
+    if not query_words:
+        return 0.0
+    text_lower = (text or '').lower()
+    hits = sum(1 for w in query_words if w in text_lower)
+    return hits / len(query_words)
+
 def _search_by_queries(
     search_queries: List[str],
     max_results: int = 30,
@@ -1499,19 +1547,31 @@ def _perform_google_search(query: str, max_results: int = 10, use_semantic: bool
                     for idx, item in enumerate(results):
                         title = item.get('title', 'No title')
                         snippet = item.get('snippet', 'No preview available')
-                        # Real semantic similarity between the query and this
-                        # result's title+snippet, using the cross-lingual
-                        # IndicBERT/IndicSBERT model - falls back to the old
-                        # rank-based estimate when the model isn't loaded, or
-                        # when the caller explicitly asked for keyword-only
-                        # (non-semantic) scoring.
-                        sim = _semantic_similarity(query, f"{title} {snippet}") if use_semantic else None
+                        combined_text = f"{title} {snippet}"
+                        if use_semantic:
+                            # Real semantic similarity between the query and
+                            # this result's title+snippet, using the
+                            # cross-lingual IndicBERT/IndicSBERT model -
+                            # falls back to a rank-based estimate only when
+                            # the model isn't loaded.
+                            sim = _semantic_similarity(query, combined_text)
+                            similarity_method = 'semantic' if sim is not None else 'rank_estimate'
+                            if sim is None:
+                                sim = max(0.8, 0.95 - (idx * 0.08))
+                        else:
+                            # Keyword-only mode: score by how many of the
+                            # actual query words appear in the result,
+                            # instead of trusting Google's rank position -
+                            # a loosely-related top result should not score
+                            # as if it were a strong match.
+                            sim = _keyword_overlap_similarity(query, combined_text)
+                            similarity_method = 'keyword_overlap'
                         match = {
                             'source': 'internet',
                             'url': item.get('link', ''),
                             'title': title,
-                            'similarity': sim if sim is not None else max(0.8, 0.95 - (idx * 0.08)),
-                            'similarity_method': 'semantic' if sim is not None else 'rank_estimate',
+                            'similarity': sim,
+                            'similarity_method': similarity_method,
                             'snippet': snippet,
                             'search_method': 'google_api'
                         }
@@ -1605,13 +1665,21 @@ def _perform_google_search(query: str, max_results: int = 10, use_semantic: bool
                     for idx, item in enumerate(results):
                         title = item.get('title', 'No title')
                         snippet = item.get('snippet', 'No preview available')
-                        sim = _semantic_similarity(query, f"{title} {snippet}") if use_semantic else None
+                        combined_text = f"{title} {snippet}"
+                        if use_semantic:
+                            sim = _semantic_similarity(query, combined_text)
+                            similarity_method = 'semantic' if sim is not None else 'rank_estimate'
+                            if sim is None:
+                                sim = max(0.5, 0.85 - (idx * 0.08))
+                        else:
+                            sim = _keyword_overlap_similarity(query, combined_text)
+                            similarity_method = 'keyword_overlap'
                         match = {
                             'source': 'internet',
                             'url': item.get('link', ''),
                             'title': title,
-                            'similarity': sim if sim is not None else max(0.5, 0.85 - (idx * 0.08)),
-                            'similarity_method': 'semantic' if sim is not None else 'rank_estimate',
+                            'similarity': sim,
+                            'similarity_method': similarity_method,
                             'snippet': snippet,
                             'search_method': 'serpapi'
                         }
