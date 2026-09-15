@@ -252,6 +252,50 @@ class SentenceBasedSearcher:
 
         return search_queries if search_queries else [text[:150]]
 
+    def create_keyword_queries(self, text: str, num_queries: int = 5) -> List[str]:
+        """
+        Create short keyword/phrase search queries, as a complement to
+        whole-sentence queries.
+
+        A full sentence - especially a machine-translated one - often fails
+        to match anything verbatim on Google, since the exact wording rarely
+        exists elsewhere on the web. A short, distinctive phrase pulled from
+        that sentence is far more likely to hit a real result, so Punjabi
+        internet search runs both sentence-based AND keyword-based queries
+        rather than relying on sentence matching alone.
+
+        Args:
+            text: Input text
+            num_queries: Number of keyword queries to generate (one per
+                sentence, at most)
+
+        Returns:
+            List of short keyword-phrase search queries
+        """
+        sentences = self.extract_sentences(text, top_n=num_queries)
+
+        keyword_queries = []
+        for sentence in sentences:
+            words = sentence.split()
+            if len(words) <= 5:
+                phrase = sentence.strip()
+            else:
+                # The middle of a sentence tends to carry the distinctive
+                # content words, skipping generic sentence-leading/trailing
+                # words (subjects, closing verbs) that add little to a search.
+                start = max(0, (len(words) - 5) // 2)
+                phrase = ' '.join(words[start:start + 5])
+
+            clean_phrase = re.sub(r'[.,!?;:\'"।]+$', '', phrase).strip()
+            if len(clean_phrase) > 8:
+                keyword_queries.append(clean_phrase)
+
+        print(f"🔑 Created {len(keyword_queries)} keyword-based search queries:")
+        for i, q in enumerate(keyword_queries, 1):
+            print(f"   {i}. {q}")
+
+        return keyword_queries[:num_queries]
+
     def create_hybrid_queries(self, text: str, num_queries: int = 5) -> List[Dict]:
         """
         Create hybrid search queries (sentences + multi-word phrases)
@@ -1191,6 +1235,44 @@ def _semantic_similarity(text_a: str, text_b: str) -> Optional[float]:
         print(f"⚠️ Semantic similarity computation failed: {e}")
         return None
 
+def _search_by_queries(search_queries: List[str], max_results: int = 30, label: str = "queries") -> List[Dict]:
+    """
+    Run _perform_google_search for each query string and merge the results.
+
+    Each query is searched independently, so the same source URL can turn up
+    under several different queries. Instead of listing that source once per
+    matching query, combine those hits into a single entry: keep the highest
+    similarity score seen for that URL, and record how many queries matched
+    it.
+    """
+    if not search_queries:
+        return []
+
+    best_by_url: Dict[str, Dict] = {}
+    match_counts: Dict[str, int] = {}
+
+    for i, search_query in enumerate(search_queries, 1):
+        print(f"\n📌 Searching with {label} {i}/{len(search_queries)}: '{search_query[:80]}...'")
+        matches = _perform_google_search(search_query, max_results // len(search_queries) + 2)
+
+        for match in matches:
+            url = match.get('url')
+            if not url:
+                continue
+            match_counts[url] = match_counts.get(url, 0) + 1
+            existing = best_by_url.get(url)
+            if existing is None or match['similarity'] > existing['similarity']:
+                best_by_url[url] = match
+
+    all_matches = []
+    for url, match in best_by_url.items():
+        match = dict(match)
+        match['matched_sentence_count'] = match_counts[url]
+        all_matches.append(match)
+
+    all_matches.sort(key=lambda x: x['similarity'], reverse=True)
+    return all_matches[:max_results]
+
 def search_internet_google(query: str, max_results: int = 30, use_sentence_search: bool = True) -> List[Dict]:
     """
     Search Google for similar content using sentence-based approach
@@ -1214,43 +1296,40 @@ def search_internet_google(query: str, max_results: int = 30, use_sentence_searc
             sentence_searcher = model_cache['sentence_searcher']
             search_queries = sentence_searcher.create_sentence_queries(query, num_queries=5)
 
-        # Each sentence is searched independently, so the same source URL can
-        # turn up under several different sentence queries. Instead of
-        # listing that source once per matching sentence, combine those hits
-        # into a single entry: keep the highest similarity score seen for
-        # that URL, and record how many of the input's sentences matched it.
-        best_by_url: Dict[str, Dict] = {}
-        match_counts: Dict[str, int] = {}
-
-        # Perform searches for each sentence
-        for i, search_query in enumerate(search_queries, 1):
-            print(f"\n📌 Searching with Query {i}/{len(search_queries)}: '{search_query[:80]}...'")
-            matches = _perform_google_search(search_query, max_results // len(search_queries) + 2)
-
-            for match in matches:
-                url = match.get('url')
-                if not url:
-                    continue
-                match_counts[url] = match_counts.get(url, 0) + 1
-                existing = best_by_url.get(url)
-                if existing is None or match['similarity'] > existing['similarity']:
-                    best_by_url[url] = match
-
-        all_matches = []
-        for url, match in best_by_url.items():
-            match = dict(match)
-            match['matched_sentence_count'] = match_counts[url]
-            all_matches.append(match)
-
-        # Sort by (combined, maximum) similarity and return top results
-        all_matches.sort(key=lambda x: x['similarity'], reverse=True)
+        all_matches = _search_by_queries(search_queries, max_results=max_results, label="Query")
 
         print(f"\n✅ Internet search completed: {len(all_matches)} unique sources found "
               f"(from {len(search_queries)} sentence queries)")
-        return all_matches[:max_results]
+        return all_matches
 
     except Exception as e:
         print(f"❌ Internet search error: {e}")
+        traceback.print_exc()
+        return []
+
+def search_internet_google_keywords(query: str, max_results: int = 30) -> List[Dict]:
+    """
+    Keyword-based internet search: short phrase queries extracted from the
+    text, as a complement to whole-sentence search. A full (often
+    machine-translated) sentence frequently fails to match anything
+    verbatim on Google, while a short distinctive phrase pulled from it is
+    far more likely to hit a real result.
+    """
+    try:
+        print(f"\n🌐 Searching Google with KEYWORD-BASED queries...")
+
+        search_queries = [query]
+        if model_cache.get('sentence_searcher'):
+            search_queries = model_cache['sentence_searcher'].create_keyword_queries(query, num_queries=5)
+
+        all_matches = _search_by_queries(search_queries, max_results=max_results, label="Keyword query")
+
+        print(f"\n✅ Keyword-based search completed: {len(all_matches)} unique sources found "
+              f"(from {len(search_queries)} keyword queries)")
+        return all_matches
+
+    except Exception as e:
+        print(f"❌ Keyword-based internet search error: {e}")
         traceback.print_exc()
         return []
 
@@ -1266,20 +1345,26 @@ def search_internet_bilingual(
       - original Hindi text
       - translated Punjabi text
 
-    Both legs are searched sentence-by-sentence (when use_sentence_search is
-    on). The Hindi leg is filtered to hindi_similarity_threshold, when given,
-    so only strong matches for the original source surface. The Punjabi
-    (translated) leg is intentionally left unfiltered - every sentence-based
-    hit is kept, however low its similarity, since the translation quality
-    itself can suppress similarity scores that would otherwise be relevant.
+    The Hindi leg is searched sentence-by-sentence (when use_sentence_search
+    is on) and filtered to hindi_similarity_threshold, when given, so only
+    strong matches for the original source surface.
+
+    The Punjabi (translated) leg is searched BOTH sentence-based AND
+    keyword-based: a full machine-translated sentence often fails to match
+    anything verbatim, while short distinctive phrases from it are more
+    likely to hit a real result. It is intentionally left unfiltered by
+    similarity - every hit from either strategy is kept, however low its
+    (semantically computed) similarity, since translation quality alone can
+    suppress scores that would otherwise be relevant.
 
     Results are merged and deduplicated by URL, keeping the higher-similarity
-    hit (rather than whichever language happened to find it first) so the
-    same source is never listed twice.
+    hit (rather than whichever language/strategy happened to find it first)
+    so the same source is never listed twice.
     """
     best_by_url: Dict[str, Dict] = {}
 
-    # 1) Search with original Hindi text - filtered to the similarity threshold
+    # 1) Search with original Hindi text - sentence-based, filtered to the
+    #    similarity threshold.
     if hindi_text and hindi_text.strip():
         print("\n🌐 INTERNET SEARCH: ORIGINAL HINDI TEXT")
         hindi_matches = search_internet_google(
@@ -1299,13 +1384,19 @@ def search_internet_bilingual(
             if existing is None or m.get("similarity", 0.0) > existing.get("similarity", 0.0):
                 best_by_url[url] = m
 
-    # 2) Search with translated Punjabi text - sentence-wise, no threshold
+    # 2) Search with translated Punjabi text - sentence-based AND
+    #    keyword-based, no similarity threshold. Both strategies' hits are
+    #    scored semantically by _perform_google_search / _semantic_similarity.
     if translated_punjabi and translated_punjabi.strip():
-        print("\n🌐 INTERNET SEARCH: TRANSLATED PUNJABI TEXT (no similarity threshold)")
+        print("\n🌐 INTERNET SEARCH: TRANSLATED PUNJABI TEXT (sentence + keyword, no threshold)")
         punjabi_matches = search_internet_google(
             translated_punjabi,
             max_results=max_results,
             use_sentence_search=use_sentence_search
+        )
+        punjabi_matches += search_internet_google_keywords(
+            translated_punjabi,
+            max_results=max_results
         )
         for m in punjabi_matches:
             url = m.get("url")
@@ -1334,6 +1425,12 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
         List of search results
     """
     matches = []
+    # Set once the Google Custom Search API actually returns a valid (200)
+    # response, whether or not it contained any items - "the API works"
+    # means the request itself succeeded, not that it happened to find a
+    # match. Used below to skip the simulated/fake fallback: simulated data
+    # is only appropriate when no real search actually ran.
+    google_api_worked = False
 
     try:
         # API credentials are read from the environment - never hardcode
@@ -1370,6 +1467,7 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                 print(f"   Response Status: {response.status_code}")
 
                 if response.status_code == 200:
+                    google_api_worked = True
                     data = response.json()
                     results = data.get('items', [])
 
@@ -1530,6 +1628,17 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
             print(f"   Set with: export SERPAPI_KEY=\"your_key\"  (macOS/Linux)")
 
         # ===== METHOD 3: FALLBACK TO SIMULATION =====
+        # Only used when NO real search actually ran (no API configured, or
+        # every configured API failed outright - bad key, quota, network
+        # error). If the Google API responded successfully at all - even
+        # with zero items for this particular query - that's a real,
+        # truthful "no matches found" and must not be replaced with fake
+        # data that could be mistaken for a genuine match.
+        if google_api_worked:
+            print(f"\n📝 Google API responded successfully but found no results for this query - "
+                  f"returning no matches instead of simulated/fake data.")
+            return matches
+
         print(f"\n📝 All real APIs unavailable - using simulated results")
         print(f"   (This is FAKE data for testing)")
 
