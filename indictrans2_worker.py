@@ -30,6 +30,7 @@ entirely for the JSON response protocol.
 
 import sys
 import json
+import traceback
 
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
@@ -62,6 +63,16 @@ def translate(tokenizer, model, device, ip, hindi_sentence):
             repetition_penalty=1.3,
             max_new_tokens=max_new_tokens,
             early_stopping=True,
+            # IndicTrans2's trust_remote_code=True modeling code predates
+            # transformers' switch to Cache-object past_key_values (it
+            # expects the legacy tuple-of-tensors format). On newer
+            # transformers that mismatch surfaces as a generate()-internal
+            # AttributeError ('NoneType' object has no attribute 'shape')
+            # the moment the cache is touched. Disabling the cache avoids
+            # that code path entirely (recompute-from-scratch each step is
+            # slower but correct) instead of pinning a fragile exact
+            # transformers version.
+            use_cache=False,
         )
 
     decoded = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
@@ -102,7 +113,12 @@ def main():
             translation = translate(tokenizer, model, device, ip, hindi_sentence)
             print(json.dumps({"translation": translation, "confidence": 0.95}), flush=True)
         except Exception as e:
+            # Log the full traceback to stderr (drained and printed by
+            # app.py with an [indictrans2_worker] prefix on every line) so
+            # a failure is diagnosable from the app's console output alone,
+            # without needing to reproduce it separately.
             log(f"[indictrans2_worker] Translation error: {type(e).__name__}: {e}")
+            log("[indictrans2_worker] " + traceback.format_exc().replace("\n", "\n[indictrans2_worker] "))
             print(json.dumps({"error": f"{type(e).__name__}: {e}"}), flush=True)
 
 
