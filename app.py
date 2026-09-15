@@ -11,6 +11,8 @@ import json
 import pickle
 import numpy as np
 import re
+import sys
+import types
 import unicodedata
 import os
 import random
@@ -938,6 +940,28 @@ def load_indictrans2_model():
               f"IndicTransToolkit itself being missing.")
         model_cache['indictrans2'] = None
         return None
+
+    # ai4bharat/indictrans2-*'s trust_remote_code=True tokenizer/model code
+    # (downloaded and executed from the HF Hub repo below) was written
+    # against transformers 4.x and can import "transformers.onnx" - a
+    # module removed entirely in transformers 5.x ("No module named
+    # 'transformers.onnx'"). We can't patch that repo's code, so register a
+    # harmless stand-in module before it runs: any name pulled from it
+    # (OnnxConfig, PatchingSpec, etc.) becomes an inert placeholder class.
+    # This is a best-effort shim, not a verified fix for the exact remote
+    # code - our translate-only usage never actually exercises ONNX export,
+    # so a real implementation of these classes shouldn't be needed, but if
+    # loading still fails afterward the remaining incompatibility will need
+    # a transformers version compatible with that remote code (it targets
+    # the 4.x series) rather than another shim here.
+    if 'transformers.onnx' not in sys.modules:
+        try:
+            class _InertOnnxStub(types.ModuleType):
+                def __getattr__(self, name):
+                    return type(name, (), {})
+            sys.modules['transformers.onnx'] = _InertOnnxStub('transformers.onnx')
+        except Exception as e:
+            print(f"⚠️ Could not install the transformers.onnx compatibility stub: {e}")
 
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
