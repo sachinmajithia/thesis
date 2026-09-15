@@ -837,11 +837,25 @@ def nmt_translate(hindi_sentence, tokenizer, model, device):
         inputs = tokenizer(hindi_sentence, return_tensors="pt", truncation=True, padding=True)
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
+        # A flat max_length=512 with plain greedy decoding and no repetition
+        # controls lets the model degenerate into looping the same phrase
+        # ("X, X, X, X...") once it exhausts real content for a short or
+        # ambiguous input - a well-known seq2seq failure mode. Beam search
+        # plus repetition controls fixes this, and capping the output
+        # length relative to the input (instead of a flat 512) means even
+        # a short sentence can't run away into hundreds of tokens.
+        input_len = inputs['input_ids'].shape[1]
+        max_new_tokens = min(200, max(20, input_len * 4))
+
         with torch.no_grad():
             generated_tokens = model.generate(
                 **inputs,
                 forced_bos_token_id=tokenizer.convert_tokens_to_ids(target_lang),
-                max_length=512
+                max_new_tokens=max_new_tokens,
+                num_beams=4,
+                no_repeat_ngram_size=3,
+                repetition_penalty=1.3,
+                early_stopping=True
             )
 
         translated_text = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
