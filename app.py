@@ -76,6 +76,12 @@ PRETRAINED_SEMANTIC_MODEL = 'l3cube-pune/indic-sentence-similarity-sbert'
 # high-confidence matches instead of every low-similarity hit.
 PLAGIARISM_SIMILARITY_THRESHOLD = 0.80
 
+# Threshold for the translated-Punjabi leg of internet search specifically,
+# which runs keyword-based (not semantic) matching - a lower bar than the
+# Hindi-source leg since keyword/phrase search naturally scores lower than
+# a full-sentence semantic comparison even for a real match.
+PUNJABI_INTERNET_SIMILARITY_THRESHOLD = 0.65
+
 model_cache = {}
 corpus_cache = {
     'documents': [],
@@ -1235,7 +1241,12 @@ def _semantic_similarity(text_a: str, text_b: str) -> Optional[float]:
         print(f"⚠️ Semantic similarity computation failed: {e}")
         return None
 
-def _search_by_queries(search_queries: List[str], max_results: int = 30, label: str = "queries") -> List[Dict]:
+def _search_by_queries(
+    search_queries: List[str],
+    max_results: int = 30,
+    label: str = "queries",
+    use_semantic: bool = True
+) -> List[Dict]:
     """
     Run _perform_google_search for each query string and merge the results.
 
@@ -1244,6 +1255,9 @@ def _search_by_queries(search_queries: List[str], max_results: int = 30, label: 
     matching query, combine those hits into a single entry: keep the highest
     similarity score seen for that URL, and record how many queries matched
     it.
+
+    use_semantic=False forces plain rank-based scoring (no cross-lingual
+    semantic model call) for keyword-only search modes.
     """
     if not search_queries:
         return []
@@ -1253,7 +1267,9 @@ def _search_by_queries(search_queries: List[str], max_results: int = 30, label: 
 
     for i, search_query in enumerate(search_queries, 1):
         print(f"\n📌 Searching with {label} {i}/{len(search_queries)}: '{search_query[:80]}...'")
-        matches = _perform_google_search(search_query, max_results // len(search_queries) + 2)
+        matches = _perform_google_search(
+            search_query, max_results // len(search_queries) + 2, use_semantic=use_semantic
+        )
 
         for match in matches:
             url = match.get('url')
@@ -1307,13 +1323,16 @@ def search_internet_google(query: str, max_results: int = 30, use_sentence_searc
         traceback.print_exc()
         return []
 
-def search_internet_google_keywords(query: str, max_results: int = 30) -> List[Dict]:
+def search_internet_google_keywords(query: str, max_results: int = 30, use_semantic: bool = True) -> List[Dict]:
     """
     Keyword-based internet search: short phrase queries extracted from the
     text, as a complement to whole-sentence search. A full (often
     machine-translated) sentence frequently fails to match anything
     verbatim on Google, while a short distinctive phrase pulled from it is
     far more likely to hit a real result.
+
+    use_semantic=False scores results by rank alone rather than calling the
+    cross-lingual semantic model.
     """
     try:
         print(f"\n🌐 Searching Google with KEYWORD-BASED queries...")
@@ -1322,7 +1341,9 @@ def search_internet_google_keywords(query: str, max_results: int = 30) -> List[D
         if model_cache.get('sentence_searcher'):
             search_queries = model_cache['sentence_searcher'].create_keyword_queries(query, num_queries=5)
 
-        all_matches = _search_by_queries(search_queries, max_results=max_results, label="Keyword query")
+        all_matches = _search_by_queries(
+            search_queries, max_results=max_results, label="Keyword query", use_semantic=use_semantic
+        )
 
         print(f"\n✅ Keyword-based search completed: {len(all_matches)} unique sources found "
               f"(from {len(search_queries)} keyword queries)")
@@ -1346,25 +1367,24 @@ def search_internet_bilingual(
       - translated Punjabi text
 
     The Hindi leg is searched sentence-by-sentence (when use_sentence_search
-    is on) and filtered to hindi_similarity_threshold, when given, so only
-    strong matches for the original source surface.
+    is on), scored semantically, and filtered to hindi_similarity_threshold,
+    when given, so only strong matches for the original source surface.
 
-    The Punjabi (translated) leg is searched BOTH sentence-based AND
-    keyword-based: a full machine-translated sentence often fails to match
-    anything verbatim, while short distinctive phrases from it are more
-    likely to hit a real result. It is intentionally left unfiltered by
-    similarity - every hit from either strategy is kept, however low its
-    (semantically computed) similarity, since translation quality alone can
-    suppress scores that would otherwise be relevant.
+    The Punjabi (translated) leg is searched keyword-based ONLY (not
+    sentence-based): a full machine-translated sentence often fails to
+    match anything verbatim, while short distinctive phrases from it are
+    far more likely to hit a real result. It is scored by rank alone
+    (no semantic model call) and filtered to
+    PUNJABI_INTERNET_SIMILARITY_THRESHOLD.
 
     Results are merged and deduplicated by URL, keeping the higher-similarity
-    hit (rather than whichever language/strategy happened to find it first)
-    so the same source is never listed twice.
+    hit (rather than whichever language happened to find it first) so the
+    same source is never listed twice.
     """
     best_by_url: Dict[str, Dict] = {}
 
-    # 1) Search with original Hindi text - sentence-based, filtered to the
-    #    similarity threshold.
+    # 1) Search with original Hindi text - sentence-based, semantic scoring,
+    #    filtered to the similarity threshold.
     if hindi_text and hindi_text.strip():
         print("\n🌐 INTERNET SEARCH: ORIGINAL HINDI TEXT")
         hindi_matches = search_internet_google(
@@ -1384,20 +1404,20 @@ def search_internet_bilingual(
             if existing is None or m.get("similarity", 0.0) > existing.get("similarity", 0.0):
                 best_by_url[url] = m
 
-    # 2) Search with translated Punjabi text - sentence-based AND
-    #    keyword-based, no similarity threshold. Both strategies' hits are
-    #    scored semantically by _perform_google_search / _semantic_similarity.
+    # 2) Search with translated Punjabi text - keyword-based only, rank-based
+    #    scoring (no semantic model call), filtered to
+    #    PUNJABI_INTERNET_SIMILARITY_THRESHOLD.
     if translated_punjabi and translated_punjabi.strip():
-        print("\n🌐 INTERNET SEARCH: TRANSLATED PUNJABI TEXT (sentence + keyword, no threshold)")
-        punjabi_matches = search_internet_google(
+        print("\n🌐 INTERNET SEARCH: TRANSLATED PUNJABI TEXT (keyword-based only, "
+              f"threshold {PUNJABI_INTERNET_SIMILARITY_THRESHOLD})")
+        punjabi_matches = search_internet_google_keywords(
             translated_punjabi,
             max_results=max_results,
-            use_sentence_search=use_sentence_search
+            use_semantic=False
         )
-        punjabi_matches += search_internet_google_keywords(
-            translated_punjabi,
-            max_results=max_results
-        )
+        punjabi_matches = [
+            m for m in punjabi_matches if m.get('similarity', 0.0) >= PUNJABI_INTERNET_SIMILARITY_THRESHOLD
+        ]
         for m in punjabi_matches:
             url = m.get("url")
             if not url:
@@ -1413,13 +1433,16 @@ def search_internet_bilingual(
     print(f"\n✅ Bilingual internet search complete: {len(all_matches)} unique sources")
     return all_matches[:max_results]
 
-def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
+def _perform_google_search(query: str, max_results: int = 10, use_semantic: bool = True) -> List[Dict]:
     """
     Perform actual Google search for a single query
 
     Args:
         query: Search query
         max_results: Maximum results to return
+        use_semantic: If False, score results by rank alone instead of
+            calling the cross-lingual semantic model (used for keyword-only
+            search modes).
 
     Returns:
         List of search results
@@ -1479,8 +1502,10 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                         # Real semantic similarity between the query and this
                         # result's title+snippet, using the cross-lingual
                         # IndicBERT/IndicSBERT model - falls back to the old
-                        # rank-based estimate only when the model isn't loaded.
-                        sim = _semantic_similarity(query, f"{title} {snippet}")
+                        # rank-based estimate when the model isn't loaded, or
+                        # when the caller explicitly asked for keyword-only
+                        # (non-semantic) scoring.
+                        sim = _semantic_similarity(query, f"{title} {snippet}") if use_semantic else None
                         match = {
                             'source': 'internet',
                             'url': item.get('link', ''),
@@ -1580,7 +1605,7 @@ def _perform_google_search(query: str, max_results: int = 10) -> List[Dict]:
                     for idx, item in enumerate(results):
                         title = item.get('title', 'No title')
                         snippet = item.get('snippet', 'No preview available')
-                        sim = _semantic_similarity(query, f"{title} {snippet}")
+                        sim = _semantic_similarity(query, f"{title} {snippet}") if use_semantic else None
                         match = {
                             'source': 'internet',
                             'url': item.get('link', ''),
@@ -1874,11 +1899,12 @@ def run_plagiarism_pipeline(hindi_text: str, use_sentence_search: bool = True) -
     # =========== STEP 3: INTERNET SEARCH (GOOGLE) - ORIGINAL HINDI + TRANSLATED PUNJABI ===========
     # Searches the internet with BOTH the original Hindi source document and
     # its Punjabi translation, each carrying its own similarity %, instead
-    # of only searching the translated text. The Hindi leg is filtered to
-    # the plagiarism similarity threshold; the Punjabi (translated) leg is
-    # searched sentence-by-sentence with NO threshold, so every matched
-    # sentence surfaces regardless of similarity.
-    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - SENTENCE-BASED, HINDI SOURCE (thresholded) + PUNJABI TRANSLATION (no threshold)")
+    # of only searching the translated text. The Hindi leg is sentence-based
+    # with semantic scoring, filtered to PLAGIARISM_SIMILARITY_THRESHOLD; the
+    # Punjabi (translated) leg is keyword-based only, with rank-based (non-
+    # semantic) scoring, filtered to PUNJABI_INTERNET_SIMILARITY_THRESHOLD.
+    print("\n[STEP 3] INTERNET SEARCH (GOOGLE) - HINDI SOURCE (sentence-based, semantic, thresholded) "
+          "+ PUNJABI TRANSLATION (keyword-based, rank-based, thresholded)")
     print("-" * 80)
 
     internet_matches = search_internet_bilingual(

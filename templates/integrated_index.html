@@ -471,7 +471,7 @@ function renderPlagiarismResult(data) {
   html += `</div>`;
 
   html += `<div class="card"><h2>Internet Matches (${internet.total_matches}) ${badge(internet.search_method, 'blue')}</h2>
-    <p style="font-size:12.5px;color:var(--muted);margin-top:-6px;">Searched the internet using the original Hindi source document sentence-by-sentence (${internet.hindi_matches || 0} matches, filtered to ≥80% similarity) and the translated Punjabi version both sentence-by-sentence and keyword-based (${internet.punjabi_matches || 0} matches, no similarity threshold), with each result scored by semantic similarity.</p>`;
+    <p style="font-size:12.5px;color:var(--muted);margin-top:-6px;">Searched the internet using the original Hindi source document sentence-by-sentence with semantic scoring (${internet.hindi_matches || 0} matches, filtered to ≥80% similarity), and the translated Punjabi version keyword-based with rank-based scoring (${internet.punjabi_matches || 0} matches, filtered to ≥65% similarity).</p>`;
   if (internet.matches && internet.matches.length) {
     html += internet.matches.slice(0, 15).map(renderInternetMatch).join('');
   } else {
